@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(winget --version)",
+      "PowerShell(winget install --id OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements --silent)",
+      "PowerShell(winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements --silent)",
+      "PowerShell(npm install -g pnpm)",
+      "PowerShell($env:Path -split ';')",
+      "WebFetch(domain:pris.ly)",
+      "WebFetch(domain:www.prisma.io)",
+      "PowerShell(Invoke-RestMethod -Uri \"http://localhost:3000/health\" -Method GET)",
+      "PowerShell(taskkill /F /PID 10484)",
+      "PowerShell(taskkill /F /PID 20660)",
+      "PowerShell(Get-Process node -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"ProcessId=10484 or ProcessId=20660\")"
+    ]
+  }
+}

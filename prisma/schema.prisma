@@ -1,0 +1,826 @@
+// ============================================================
+// GACI — Gestión Automatizada de Costos de Importación
+// Prisma Schema v1.1
+// Fecha: 14 de Septiembre de 2026
+//
+// Cambios v1.1 respecto al diseño inicial:
+//   - CalculationType: agregado RANGE_VALUE (rangos progresivos
+//     sobre un valor monetario — usado en Honorarios y Manejo
+//     de Mercadería del agente aduanero, base CIF en HNL)
+//   - Regla confirmada: ISV se calcula sobre CIF USD, no CIF LPS
+//   - Regla confirmada: tramo 7 de Honorarios no tiene mínimo
+//   - Regla confirmada: todos los costos HNL se convierten a USD
+//     usando el tipo de cambio congelado en la cotización
+//
+// Grupos:
+//   1. Seguridad y Acceso
+//   2. Geografía y Configuración
+//   3. Datos Maestros
+//   4. Tarifas
+//   5. Cotizaciones
+//   6. Auditoría
+//   7. Documentos
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  ADMIN
+  COMERCIAL
+  OPERACIONES
+}
+
+enum Permission {
+  // Cotizaciones
+  QUOTATION_CREATE
+  QUOTATION_VIEW
+  QUOTATION_EDIT
+  QUOTATION_CHANGE_STATE
+  QUOTATION_CREATE_DRAFT    // Solo crear borradores (sin OPP)
+  QUOTATION_VIEW_OPP        // Ver número de OPP
+  QUOTATION_EDIT_AFTER_SENT // Modificar desde ENVIADA (solo Admin con justificación)
+  QUOTATION_COMPARE         // Ver vista comparativa por OPP
+
+  // Datos Maestros
+  MASTER_DATA_VIEW
+  MASTER_DATA_EDIT
+
+  // Tarifas
+  TARIFF_VIEW
+  TARIFF_EDIT
+
+  // Usuarios y Roles
+  USER_MANAGE
+  ROLE_MANAGE
+
+  // Configuración
+  COUNTRY_CONFIG_EDIT
+  EXCHANGE_RATE_EDIT
+}
+
+enum QuotationStatus {
+  BORRADOR
+  PENDIENTE
+  ENVIADA
+  VIGENTE
+  GANADA
+  EN_PROCESO
+  ALTERNATIVA
+  CERRADA
+  RECHAZADA
+  CANCELADA
+  ARCHIVADA
+}
+
+enum TransportType {
+  AEREO
+  MARITIMO
+}
+
+enum CalculationType {
+  FIXED        // Monto fijo en la moneda del componente
+  PER_KG       // Tarifa directa por kilogramo
+  PER_LB       // Tarifa directa por libra
+  PER_CFT      // Tarifa directa por pie cúbico
+  PER_VALUE    // Porcentaje directo sobre un valor base (ej: ISV = CIF × 15%)
+  MAX_OF       // MAX(base × rate, minimum) — ej: Security, Screening, Delivery PFI
+  RANGE_KG     // Progresivo acumulativo por tramos de KG
+               //   tariff_ranges: [{ from, to, type: "fixed"|"per_unit", amount?, rate? }]
+               //   Usado en: Supervisión/Registro, Almacenaje, Flete Terrestre
+  RANGE_LB     // Progresivo acumulativo por tramos de LB
+               //   tariff_ranges: [{ from, to, type: "fixed"|"base_plus", amount?, base?, rate?, base_from? }]
+               //   Usado en: Pick Up & Delivery marítimo
+  RANGE_CFT    // Progresivo acumulativo por tramos de CFT (reservado para expansión)
+  RANGE_VALUE  // Progresivo acumulativo por tramos sobre valor monetario (HNL)
+               //   tariff_ranges: [{ from, to, type: "fixed"|"per_value", amount?, rate?, min? }]
+               //   Base: CIF_USD × exchange_rate = CIF_HNL
+               //   Resultado en HNL → se convierte a USD al guardar
+               //   Usado en: Honorarios Profesionales, Manejo de Mercadería
+}
+
+enum CostCategory {
+  CONSOLIDATOR        // Costos del consolidador (flete internacional PFI)
+  CUSTOMS_AGENT       // Costos del agente aduanero (gestión local completa + ISV)
+  INSURANCE           // Seguro (FOB × 0.35%)
+  OTHER_INTERNATIONAL // Otros gastos internacionales (campo libre)
+}
+
+// Unidad base para un componente MAX_OF (el único CalculationType cuya unidad
+// no queda implícita en su propio nombre, a diferencia de PER_KG/RANGE_LB/etc.)
+enum TariffBasis {
+  KG
+  LB
+  CFT
+}
+
+// ============================================================
+// GRUPO 1 — SEGURIDAD Y ACCESO
+// ============================================================
+
+model User {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String    @unique @db.VarChar(255)
+  password_hash String    @db.VarChar(255)
+  full_name     String    @db.VarChar(255)
+  role          Role
+  is_active     Boolean   @default(true)
+  deleted_at    DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  extra_permissions UserPermission[]
+  refresh_tokens    RefreshToken[]
+  quotations        Quotation[]        @relation("QuotationResponsible")
+  audit_state       AuditStateChange[]
+  audit_data        AuditDataChange[]
+  uploaded_docs     QuotationDocument[]
+
+  @@index([email])
+  @@index([role, is_active])
+  @@index([deleted_at])
+  @@map("user")
+}
+
+// Permisos extra por usuario, sumados sobre los del rol base
+model UserPermission {
+  id         String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String     @db.Uuid
+  permission Permission
+
+  granted_at DateTime @default(now())
+  granted_by String   @db.Uuid // user_id de quien lo otorgó — sin FK para no complicar auditoría
+
+  // Relaciones
+  user User @relation(fields: [user_id], references: [id])
+
+  @@unique([user_id, permission])
+  @@index([user_id])
+  @@map("user_permission")
+}
+
+// Refresh tokens de sesión — permiten rotación en cada renovación y
+// detección de robo (reuso de un token ya rotado revoca toda la cadena).
+model RefreshToken {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id     String    @db.Uuid
+  token_hash  String    @db.VarChar(255) // SHA-256 del refresh token; nunca se guarda el token crudo
+  expires_at  DateTime
+  revoked_at  DateTime?
+  replaced_by String?   @db.Uuid // id del token que lo reemplazó (cadena de rotación)
+  ip_address  String?   @db.VarChar(45)
+  user_agent  String?   @db.Text
+  created_at  DateTime  @default(now())
+
+  // Relaciones
+  user User @relation(fields: [user_id], references: [id])
+
+  @@index([user_id])
+  @@index([token_hash])
+  @@map("refresh_token")
+}
+
+// ============================================================
+// GRUPO 2 — GEOGRAFÍA Y CONFIGURACIÓN
+// ============================================================
+
+model Country {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code        String  @unique @db.VarChar(3)  // ISO 3166-1 alpha-2: HN, GT, SV, CR, PA, NI, EC
+  name        String  @db.VarChar(100)
+  currency_id String  @db.Uuid
+  is_active   Boolean @default(true)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  currency              Currency             @relation(fields: [currency_id], references: [id])
+  clients               Client[]
+  quotations            Quotation[]
+  consolidator_tariffs  ConsolidatorTariff[]
+  customs_agent_tariffs CustomsAgentTariff[]
+
+  @@index([code])
+  @@index([is_active])
+  @@map("country")
+}
+
+model Currency {
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code   String @unique @db.VarChar(3)  // ISO 4217: USD, HNL, GTQ, CRC, PAB, NIO
+  name   String @db.VarChar(100)
+  symbol String @db.VarChar(5)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  countries           Country[]
+  exchange_rates_from ExchangeRate[] @relation("ExchangeRateFrom")
+  exchange_rates_to   ExchangeRate[] @relation("ExchangeRateTo")
+
+  @@index([code])
+  @@map("currency")
+}
+
+// Tasa de cambio por fecha puntual.
+// Cada cotización congela la tasa del día en que se crea.
+// Si la tasa del día no existe, el sistema usa la más reciente disponible.
+model ExchangeRate {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  from_currency_id String   @db.Uuid
+  to_currency_id   String   @db.Uuid
+  rate             Decimal  @db.Decimal(18, 6)
+  date             DateTime @db.Date
+
+  created_at DateTime @default(now())
+  created_by String   @db.Uuid // user_id — sin FK intencional (tabla de referencia histórica)
+
+  // Relaciones
+  from_currency Currency @relation("ExchangeRateFrom", fields: [from_currency_id], references: [id])
+  to_currency   Currency @relation("ExchangeRateTo",   fields: [to_currency_id],   references: [id])
+
+  @@unique([from_currency_id, to_currency_id, date])
+  @@index([from_currency_id, to_currency_id, date])
+  @@map("exchange_rate")
+}
+
+// ============================================================
+// GRUPO 3 — DATOS MAESTROS
+// ============================================================
+
+model Client {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String    @db.VarChar(255)
+  tax_id     String?   @db.VarChar(50)  // RTN en Honduras, NIT en Guatemala, etc.
+  email      String?   @db.VarChar(255)
+  phone      String?   @db.VarChar(50)
+  address    String?   @db.Text
+  country_id String    @db.Uuid
+  is_active  Boolean   @default(true)
+  deleted_at DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  country    Country     @relation(fields: [country_id], references: [id])
+  quotations Quotation[]
+
+  @@index([name])
+  @@index([country_id, is_active])
+  @@index([deleted_at])
+  @@map("client")
+}
+
+model Supplier {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String    @db.VarChar(255)
+  email      String?   @db.VarChar(255)
+  phone      String?   @db.VarChar(50)
+  country    String?   @db.VarChar(100) // País del proveedor como texto libre (internacionales)
+  is_active  Boolean   @default(true)
+  deleted_at DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  products Product[]
+
+  @@index([name])
+  @@index([deleted_at])
+  @@map("supplier")
+}
+
+model Product {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name         String    @db.VarChar(255)
+  description  String?   @db.Text
+  sku          String?   @unique @db.VarChar(100)
+  supplier_id  String?   @db.Uuid
+  weight_kg    Decimal   @db.Decimal(10, 3) // Peso base del catálogo en KG
+  weight_lb    Decimal   @db.Decimal(10, 3) // weight_kg × 2.20462 — almacenado para evitar recalcular
+  volume_cft   Decimal   @db.Decimal(10, 3) // Volumen base del catálogo en CFT
+  customs_code String?   @db.VarChar(50)    // Código arancelario / aduanero
+  is_active    Boolean   @default(true)
+  deleted_at   DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  supplier           Supplier?          @relation(fields: [supplier_id], references: [id])
+  quotation_products QuotationProduct[]
+
+  @@index([name])
+  @@index([sku])
+  @@index([supplier_id])
+  @@index([deleted_at])
+  @@map("product")
+}
+
+model Consolidator {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String    @db.VarChar(255)
+  description String?   @db.Text
+  email       String?   @db.VarChar(255)
+  phone       String?   @db.VarChar(50)
+  is_active   Boolean   @default(true)
+  deleted_at  DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  tariffs    ConsolidatorTariff[]
+  quotations Quotation[]
+
+  @@index([name])
+  @@index([is_active])
+  @@index([deleted_at])
+  @@map("consolidator")
+}
+
+model CustomsAgent {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name           String    @db.VarChar(255)
+  description    String?   @db.Text
+  email          String?   @db.VarChar(255)
+  phone          String?   @db.VarChar(50)
+  license_number String?   @db.VarChar(100) // Número de licencia del agente aduanero
+  is_active      Boolean   @default(true)
+  deleted_at     DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  tariffs    CustomsAgentTariff[]
+  quotations Quotation[]
+
+  @@index([name])
+  @@index([is_active])
+  @@index([deleted_at])
+  @@map("customs_agent")
+}
+
+model Pallet {
+  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name          String  @db.VarChar(100)
+  description   String? @db.Text
+  max_weight_kg Decimal @db.Decimal(10, 3)
+  length_cm     Decimal @db.Decimal(8, 2)
+  width_cm      Decimal @db.Decimal(8, 2)
+  height_cm     Decimal @db.Decimal(8, 2)
+  volume_cft    Decimal @db.Decimal(10, 3)
+  is_active     Boolean @default(true)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  quotations Quotation[]
+
+  @@index([is_active])
+  @@map("pallet")
+}
+
+// ============================================================
+// GRUPO 4 — TARIFAS
+// ============================================================
+//
+// Las tarifas se versionan mediante valid_from / valid_until.
+//
+// Al crear una cotización:
+//   1. Se registra el ID de la tarifa vigente en ese momento.
+//   2. Los valores calculados se guardan en QuotationCostDetail
+//      con un calculation_snapshot que contiene la fórmula completa.
+//
+// Esto garantiza que el histórico sea inmutable aunque la tarifa
+// maestra cambie o se desactive.
+//
+// Estructura de tariff_ranges por CalculationType:
+//
+//   RANGE_KG / RANGE_CFT:
+//     [
+//       { "from": 0,   "to": 50,   "type": "fixed",    "amount": 200 },
+//       { "from": 51,  "to": 550,  "type": "per_unit", "rate": 0.08 },
+//       { "from": 551, "to": null, "type": "per_unit", "rate": 0.05 }
+//     ]
+//
+//   RANGE_LB (Pick Up & Delivery marítimo):
+//     [
+//       { "from": 0,    "to": 1250, "type": "fixed",     "amount": 75 },
+//       { "from": 1251, "to": 2083, "type": "fixed",     "amount": 125 },
+//       { "from": 2084, "to": null, "type": "base_plus", "base": 125, "rate": 0.06, "base_from": 2083 }
+//     ]
+//
+//   RANGE_VALUE (Honorarios, Manejo de Mercadería — sobre CIF en HNL):
+//     [
+//       { "from": 0,       "to": 1500,   "type": "fixed",     "amount": 1000 },
+//       { "from": 1500,    "to": 4000,   "type": "per_value", "rate": 0.05,  "min": 125 },
+//       { "from": 4000,    "to": 24000,  "type": "per_value", "rate": 0.03,  "min": 600 },
+//       { "from": 24000,   "to": 64000,  "type": "per_value", "rate": 0.015, "min": 600 },
+//       { "from": 64000,   "to": 124000, "type": "per_value", "rate": 0.01,  "min": 600 },
+//       { "from": 124000,  "to": 200000, "type": "per_value", "rate": 0.006, "min": 456 },
+//       { "from": 200000,  "to": null,   "type": "per_value", "rate": 0.005 }
+//     ]
+//     Nota: el último tramo NO tiene "min" — el tramo 7 de Honorarios
+//     no tiene mínimo real (verificado contra el Excel de referencia).
+//
+// ============================================================
+
+model ConsolidatorTariff {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  consolidator_id String        @db.Uuid
+  country_id      String        @db.Uuid
+  transport_type  TransportType
+  name            String        @db.VarChar(255) // Ej: "PFI Aéreo Honduras 2026"
+  valid_from      DateTime      @db.Date
+  valid_until     DateTime?     @db.Date         // NULL = vigente indefinidamente
+  notes           String?       @db.Text
+  is_active       Boolean       @default(true)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  created_by String   @db.Uuid  // user_id — sin FK (tabla de referencia)
+
+  // Relaciones
+  consolidator Consolidator                  @relation(fields: [consolidator_id], references: [id])
+  country      Country                       @relation(fields: [country_id],       references: [id])
+  components   ConsolidatorTariffComponent[]
+  quotations   Quotation[]
+
+  @@index([consolidator_id, country_id, transport_type, valid_from])
+  @@index([is_active, valid_from, valid_until])
+  @@map("consolidator_tariff")
+}
+
+model ConsolidatorTariffComponent {
+  id                    String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  consolidator_tariff_id String         @db.Uuid
+  name                  String          @db.VarChar(255) // "Air Freight", "Fuel Surcharge", etc.
+  calculation_type      CalculationType
+  currency_id           String          @db.Uuid         // Moneda del componente (siempre USD para PFI)
+
+  // Valores según CalculationType:
+  //
+  //   FIXED:     fixed_amount
+  //   MAX_OF:    rate_per_unit + minimum_amount
+  //              resultado = MAX(base × rate_per_unit, minimum_amount)
+  //   PER_VALUE: rate_percentage (sobre FOB o CIF en USD)
+  //   RANGE_*:   tariff_ranges (JSON con estructura documentada arriba)
+  //
+  fixed_amount    Decimal? @db.Decimal(12, 4)
+  rate_per_unit   Decimal? @db.Decimal(12, 6) // Para MAX_OF y PER_KG/LB/CFT directos
+  rate_percentage Decimal? @db.Decimal(8, 6)  // Para PER_VALUE
+  minimum_amount  Decimal? @db.Decimal(12, 4) // Para MAX_OF
+  maximum_amount  Decimal? @db.Decimal(12, 4) // Límite superior si aplica (no usado en PFI actual)
+  tariff_ranges   Json?                        // Para RANGE_KG, RANGE_LB, RANGE_CFT, RANGE_VALUE
+  basis_unit      TariffBasis?                 // Requerido solo para MAX_OF (kg/lb/cft)
+
+  sort_order Int     @default(0)
+  notes      String? @db.Text
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  consolidator_tariff ConsolidatorTariff @relation(fields: [consolidator_tariff_id], references: [id])
+
+  @@index([consolidator_tariff_id, sort_order])
+  @@map("consolidator_tariff_component")
+}
+
+model CustomsAgentTariff {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customs_agent_id String    @db.Uuid
+  country_id       String    @db.Uuid
+  name             String    @db.VarChar(255) // Ej: "Gunera Honduras 2026"
+  valid_from       DateTime  @db.Date
+  valid_until      DateTime? @db.Date
+  notes            String?   @db.Text
+  is_active        Boolean   @default(true)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  created_by String   @db.Uuid
+
+  // Relaciones
+  customs_agent CustomsAgent                  @relation(fields: [customs_agent_id], references: [id])
+  country       Country                       @relation(fields: [country_id],       references: [id])
+  components    CustomsAgentTariffComponent[]
+  quotations    Quotation[]
+
+  @@index([customs_agent_id, country_id, valid_from])
+  @@index([is_active, valid_from, valid_until])
+  @@map("customs_agent_tariff")
+}
+
+model CustomsAgentTariffComponent {
+  id                      String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customs_agent_tariff_id String          @db.Uuid
+  name                    String          @db.VarChar(255)
+  // Ejemplos: "Declaración DEVA", "Transmisión Electrónica", "Papelería",
+  //           "Examen Preliminar", "Fotocopias", "Llenado DUCA", "Llenado DI",
+  //           "Honorarios Profesionales", "Supervisión y Registro",
+  //           "Manejo de Mercadería", "Almacenaje", "Flete Terrestre", "ISV"
+  category                CostCategory    // Siempre CUSTOMS_AGENT para este modelo
+  calculation_type        CalculationType
+  currency_id             String          @db.Uuid // HNL para la mayoría; USD para ISV
+
+  // Mismos campos de valor que ConsolidatorTariffComponent
+  fixed_amount    Decimal? @db.Decimal(12, 4)
+  rate_per_unit   Decimal? @db.Decimal(12, 6)
+  rate_percentage Decimal? @db.Decimal(8, 6)
+  minimum_amount  Decimal? @db.Decimal(12, 4)
+  maximum_amount  Decimal? @db.Decimal(12, 4)
+  tariff_ranges   Json?
+  basis_unit      TariffBasis? // Requerido solo para MAX_OF (kg/lb/cft)
+
+  sort_order  Int     @default(0)
+  notes       String? @db.Text
+  is_optional Boolean @default(false) // Cargos que no aplican en todos los casos
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  customs_agent_tariff CustomsAgentTariff @relation(fields: [customs_agent_tariff_id], references: [id])
+
+  @@index([customs_agent_tariff_id, sort_order])
+  @@map("customs_agent_tariff_component")
+}
+
+// ============================================================
+// GRUPO 5 — COTIZACIONES
+// ============================================================
+
+model Quotation {
+  id               String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reference_number String          @unique @db.VarChar(50)  // Autogenerado: GACI-2026-0001
+  opportunity_id   Int?                                      // Número OPP ConnectWise (manual, sin integración)
+  status           QuotationStatus @default(BORRADOR)
+  transport_type   TransportType
+
+  // Entidades seleccionadas
+  client_id         String @db.Uuid
+  country_id        String @db.Uuid
+  consolidator_id   String @db.Uuid
+  customs_agent_id  String @db.Uuid
+
+  // IDs de tarifa vigente al momento de crear — congelados
+  // Los valores detallados están en QuotationCostDetail con snapshot completo
+  consolidator_tariff_id    String @db.Uuid
+  customs_agent_tariff_id   String @db.Uuid
+
+  // Pallet opcional
+  pallet_id String? @db.Uuid
+
+  // Tipo de cambio congelado al momento de crear la cotización
+  // Se usa para convertir todos los costos HNL → USD en esta cotización
+  exchange_rate      Decimal  @db.Decimal(18, 6) // Tasa USD→HNL usada
+  exchange_rate_date DateTime @db.Date            // Fecha de la tasa
+
+  // Totales físicos calculados a partir de QuotationProduct
+  total_weight_kg  Decimal @db.Decimal(10, 3)
+  total_weight_lb  Decimal @db.Decimal(10, 3)
+  total_volume_cft Decimal @db.Decimal(10, 3)
+
+  // Costos en USD — todos almacenados como resultado final en USD
+  // El desglose completo está en QuotationCostDetail
+  fob                       Decimal @db.Decimal(14, 4) // Suma de fob_total de todos los productos
+  insurance                 Decimal @db.Decimal(14, 4) // FOB × 0.0035
+  other_international_costs Decimal @db.Decimal(14, 4) @default(0)
+  subtotal_consolidator     Decimal @db.Decimal(14, 4) // Suma de costos PFI en USD
+  cif                       Decimal @db.Decimal(14, 4) // FOB + subtotal_consolidator + insurance + other
+  subtotal_customs_agent    Decimal @db.Decimal(14, 4) // Suma de costos agente en USD (incluye ISV)
+  total_cost                Decimal @db.Decimal(14, 4) // CIF + subtotal_customs_agent
+
+  // Margen comercial — ingresado manualmente por Comercial
+  // margin_amount es el campo primario (monto directo en USD)
+  // margin_percentage es derivado/referencia: margin_amount / total_cost
+  margin_amount     Decimal @db.Decimal(14, 4)
+  margin_percentage Decimal @db.Decimal(8, 4) // Referencia: margin_amount / total_cost × 100
+  sale_price        Decimal @db.Decimal(14, 4) // total_cost + margin_amount
+
+  // Porcentaje de nacionalización — calculado, no ingresado
+  // Base: FOB + subtotal_consolidator (NO es el CIF completo — definición de negocio)
+  // Porcentaje: subtotal_customs_agent / nationalization_base × 100
+  nationalization_base       Decimal @db.Decimal(14, 4)
+  nationalization_percentage Decimal @db.Decimal(8, 4)
+
+  // Notas
+  observations   String? @db.Text // Visible para el cliente
+  internal_notes String? @db.Text // Solo interno
+
+  // Responsable
+  responsible_user_id String @db.Uuid
+
+  // Timestamps de estados clave (para reportes y filtros)
+  sent_at     DateTime?
+  won_at      DateTime?
+  closed_at   DateTime?
+  archived_at DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  client               Client             @relation(fields: [client_id],                references: [id])
+  country              Country            @relation(fields: [country_id],               references: [id])
+  consolidator         Consolidator       @relation(fields: [consolidator_id],          references: [id])
+  customs_agent        CustomsAgent       @relation(fields: [customs_agent_id],         references: [id])
+  consolidator_tariff  ConsolidatorTariff @relation(fields: [consolidator_tariff_id],   references: [id])
+  customs_agent_tariff CustomsAgentTariff @relation(fields: [customs_agent_tariff_id],  references: [id])
+  pallet               Pallet?            @relation(fields: [pallet_id],                references: [id])
+  responsible_user     User               @relation("QuotationResponsible", fields: [responsible_user_id], references: [id])
+
+  products            QuotationProduct[]
+  cost_details        QuotationCostDetail[]
+  documents           QuotationDocument[]
+  audit_state_changes AuditStateChange[]
+  audit_data_changes  AuditDataChange[]
+
+  @@index([opportunity_id])
+  @@index([status])
+  @@index([client_id, status])
+  @@index([responsible_user_id, status])
+  @@index([country_id, status])
+  @@index([consolidator_id])
+  @@index([customs_agent_id])
+  @@index([created_at])
+  @@index([reference_number])
+  @@map("quotation")
+}
+
+model QuotationProduct {
+  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quotation_id String @db.Uuid
+  product_id   String @db.Uuid
+  quantity     Int
+
+  // Override opcional de medidas para esta operación específica.
+  // Si son NULL → se usan los valores del catálogo (product.weight_kg, etc.)
+  weight_kg_override  Decimal? @db.Decimal(10, 3)
+  weight_lb_override  Decimal? @db.Decimal(10, 3)
+  volume_cft_override Decimal? @db.Decimal(10, 3)
+
+  // Valores efectivamente usados en el cálculo (catálogo o override × quantity)
+  weight_kg_used  Decimal @db.Decimal(10, 3)
+  weight_lb_used  Decimal @db.Decimal(10, 3)
+  volume_cft_used Decimal @db.Decimal(10, 3)
+
+  // FOB de este producto en esta cotización
+  fob_unit_price Decimal @db.Decimal(14, 4)
+  fob_total      Decimal @db.Decimal(14, 4) // fob_unit_price × quantity
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  quotation Quotation @relation(fields: [quotation_id], references: [id])
+  product   Product   @relation(fields: [product_id],   references: [id])
+
+  @@unique([quotation_id, product_id])
+  @@index([quotation_id])
+  @@index([product_id])
+  @@map("quotation_product")
+}
+
+// Detalle inmutable de cada línea de costo calculada en la cotización.
+// Una vez que la cotización sale de BORRADOR, estos registros no se modifican.
+//
+// calculation_snapshot garantiza reproducibilidad histórica:
+// aunque la tarifa maestra cambie, siempre podemos saber exactamente
+// cómo y con qué valores se calculó esta cotización.
+//
+// Estructura del snapshot por tipo:
+//   FIXED:      { "type": "FIXED", "amount": 335.02, "currency": "HNL" }
+//   MAX_OF:     { "type": "MAX_OF", "base_value": 720, "rate": 0.15, "minimum": 40, "result": 108, "currency": "USD" }
+//   RANGE_KG:   { "type": "RANGE_KG", "input_kg": 300, "ranges": [...], "result_hnl": 220, "result_usd": 8.15 }
+//   RANGE_VALUE:{ "type": "RANGE_VALUE", "cif_usd": 13035, "exchange_rate": 27.004,
+//                 "cif_hnl": 351997.14, "ranges": [...], "result_hnl": 4140.99, "result_usd": 153.35 }
+//   PER_VALUE:  { "type": "PER_VALUE", "base": "CIF_USD", "base_value": 13035, "rate": 0.15, "result_usd": 1955.25 }
+model QuotationCostDetail {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quotation_id   String       @db.Uuid
+  category       CostCategory
+  component_name String       @db.VarChar(255)
+  sort_order     Int          @default(0)
+
+  // FK opcional al componente de tarifa usado.
+  // NULL solo para: INSURANCE (calculado inline) y OTHER_INTERNATIONAL (manual)
+  consolidator_tariff_component_id  String? @db.Uuid
+  customs_agent_tariff_component_id String? @db.Uuid
+
+  // Snapshot completo para reproducibilidad histórica
+  calculation_snapshot Json
+
+  // Valores del cálculo
+  original_amount   Decimal  @db.Decimal(14, 4) // Monto en la moneda original del componente
+  original_currency String   @db.VarChar(3)     // "USD" o "HNL"
+  exchange_rate     Decimal? @db.Decimal(18, 6)  // Tasa usada si original_currency = "HNL"
+  amount_usd        Decimal  @db.Decimal(14, 4)  // Monto final en USD (moneda base del sistema)
+
+  // Base del cálculo (para auditoría)
+  calculation_basis String?  @db.VarChar(50)   // "KG", "LB", "CFT", "CIF_USD", "CIF_HNL", "FOB"
+  basis_value       Decimal? @db.Decimal(14, 4) // Valor numérico de la base
+
+  // Override manual (el usuario puede sobreescribir un cálculo con justificación)
+  is_manual_override Boolean @default(false)
+  override_reason    String? @db.Text
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  quotation Quotation @relation(fields: [quotation_id], references: [id])
+
+  @@index([quotation_id, category])
+  @@index([quotation_id, sort_order])
+  @@map("quotation_cost_detail")
+}
+
+// ============================================================
+// GRUPO 6 — AUDITORÍA
+// ============================================================
+
+model AuditStateChange {
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quotation_id String          @db.Uuid
+  from_status  QuotationStatus
+  to_status    QuotationStatus
+  changed_by   String          @db.Uuid
+  changed_at   DateTime        @default(now())
+  reason       String?         @db.Text   // Obligatorio en transiciones que lo requieran
+  ip_address   String?         @db.VarChar(45)
+  user_agent   String?         @db.Text
+
+  // Relaciones
+  quotation Quotation @relation(fields: [quotation_id], references: [id])
+  user      User      @relation(fields: [changed_by],   references: [id])
+
+  @@index([quotation_id, changed_at])
+  @@index([changed_by, changed_at])
+  @@map("audit_state_change")
+}
+
+model AuditDataChange {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quotation_id String   @db.Uuid
+  field_name   String   @db.VarChar(100) // Campo modificado
+  old_value    String?  @db.Text         // Valor anterior serializado
+  new_value    String   @db.Text         // Valor nuevo serializado
+  changed_by   String   @db.Uuid
+  changed_at   DateTime @default(now())
+  reason       String?  @db.Text         // Obligatorio si la cotización ya fue ENVIADA
+  ip_address   String?  @db.VarChar(45)
+
+  // Relaciones
+  quotation Quotation @relation(fields: [quotation_id], references: [id])
+  user      User      @relation(fields: [changed_by],   references: [id])
+
+  @@index([quotation_id, changed_at])
+  @@index([quotation_id, field_name])
+  @@index([changed_by, changed_at])
+  @@map("audit_data_change")
+}
+
+// ============================================================
+// GRUPO 7 — DOCUMENTOS
+// ============================================================
+
+model QuotationDocument {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quotation_id  String   @db.Uuid
+  name          String   @db.VarChar(255)
+  document_type String   @db.VarChar(100) // "FACTURA", "POLIZA", "PFI_COTIZACION", "OTRO"
+  url           String   @db.Text          // URL en storage externo
+  file_size_kb  Int?
+  uploaded_by   String   @db.Uuid
+  uploaded_at   DateTime @default(now())
+  notes         String?  @db.Text
+
+  // Relaciones
+  quotation     Quotation @relation(fields: [quotation_id], references: [id])
+  uploaded_user User      @relation(fields: [uploaded_by],  references: [id])
+
+  @@index([quotation_id])
+  @@index([uploaded_by])
+  @@map("quotation_document")
+}
