@@ -727,6 +727,7 @@ async function main() {
         currency_id: usd.id, // USD — sin conversión
         rate_percentage: 0.15,
         sort_order: 13,
+        is_tax: true, // Impuesto de paso: se muestra en el desglose, no se suma al total_cost.
         notes: 'ISV = CIF_USD × 15%. Base: CIF en USD, resultado en USD. Verificado: CIF $13,035 → $1,955.25.',
       },
     ],

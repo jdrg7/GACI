@@ -129,6 +129,7 @@ export async function addComponent(
         basis_unit: input.basis_unit,
         notes: input.notes,
         is_optional: input.is_optional,
+        is_tax: input.is_tax,
       }),
     },
   })
@@ -168,6 +169,7 @@ export async function updateComponent(
       tariff_ranges: input.tariff_ranges ?? Prisma.JsonNull,
       basis_unit: input.basis_unit ?? null,
       is_optional: input.is_optional ?? false,
+      is_tax: input.is_tax ?? false,
       ...pickDefined({ sort_order: input.sort_order, notes: input.notes }),
     },
   })

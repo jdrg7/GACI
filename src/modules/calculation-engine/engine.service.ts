@@ -15,13 +15,16 @@ function calculateComponents(
   category: CostCategory,
   basis: ComponentBasis,
   exchangeRate: number,
-): { total: number; lines: CostDetailLine[] } {
+): { total: number; taxTotal: number; lines: CostDetailLine[] } {
   let total = 0
+  let taxTotal = 0
   const lines: CostDetailLine[] = []
 
   for (const component of components) {
     const result = calculateComponent(component, basis, exchangeRate)
+    const isTax = 'is_tax' in component && component.is_tax === true
     total = round(total + result.amount_usd, 4)
+    if (isTax) taxTotal = round(taxTotal + result.amount_usd, 4)
     lines.push({
       ...result,
       category,
@@ -29,10 +32,11 @@ function calculateComponents(
       sort_order: component.sort_order,
       consolidator_tariff_component_id: isConsolidatorComponent(component) ? component.id : null,
       customs_agent_tariff_component_id: isConsolidatorComponent(component) ? null : component.id,
+      is_tax: isTax,
     })
   }
 
-  return { total, lines }
+  return { total, taxTotal, lines }
 }
 
 export interface RecomputedTotals {
@@ -60,7 +64,7 @@ export interface RecomputedTotals {
 export function recomputeTotalsFromCostDetails(
   fob: number,
   marginAmount: number,
-  costDetails: { category: CostCategory; amount_usd: number }[],
+  costDetails: { category: CostCategory; amount_usd: number; is_tax?: boolean }[],
 ): RecomputedTotals {
   const sumBy = (category: CostCategory): number =>
     round(
@@ -71,15 +75,29 @@ export function recomputeTotalsFromCostDetails(
   const insurance = sumBy(CostCategory.INSURANCE)
   const otherInternationalCosts = sumBy(CostCategory.OTHER_INTERNATIONAL)
   const subtotalConsolidator = sumBy(CostCategory.CONSOLIDATOR)
-  const subtotalCustomsAgent = sumBy(CostCategory.CUSTOMS_AGENT)
+  // Total del agente incluyendo el ISV (u otro is_tax) — se usa solo para el % de
+  // nacionalización, que sigue basándose en el costo completo que cobra el agente.
+  const agentTotalWithTax = sumBy(CostCategory.CUSTOMS_AGENT)
+  // Impuestos de paso (ej. ISV): se muestran en el desglose pero no se suman ni al
+  // subtotal del agente aduanero ni al total_cost.
+  const taxAmount = round(
+    costDetails
+      .filter((c) => c.category === CostCategory.CUSTOMS_AGENT && c.is_tax === true)
+      .reduce((sum, c) => sum + c.amount_usd, 0),
+    4,
+  )
+  const subtotalCustomsAgent = round(agentTotalWithTax - taxAmount, 4)
 
+  // El CIF (FOB + Seguro + Otros costos internacionales + Flete) es solo la base
+  // para calcular el ISV y el % de nacionalización — no aporta nada al costo
+  // total, que es el costo real del servicio: flete/consolidador + agente aduanero.
   const cif = round(fob + subtotalConsolidator + insurance + otherInternationalCosts, 4)
-  const totalCost = round(cif + subtotalCustomsAgent, 4)
+  const totalCost = round(subtotalConsolidator + subtotalCustomsAgent, 4)
   const salePrice = round(totalCost + marginAmount, 4)
   const marginPercentage = totalCost > 0 ? round((marginAmount / totalCost) * 100, 4) : 0
   const nationalizationBase = round(fob + subtotalConsolidator, 4)
   const nationalizationPercentage =
-    nationalizationBase > 0 ? round((subtotalCustomsAgent / nationalizationBase) * 100, 4) : 0
+    nationalizationBase > 0 ? round((agentTotalWithTax / nationalizationBase) * 100, 4) : 0
 
   return {
     fob: round(fob, 4),
@@ -160,6 +178,7 @@ export function calculateQuotation(input: EngineInput): EngineResult {
     sort_order: -1,
     consolidator_tariff_component_id: null,
     customs_agent_tariff_component_id: null,
+    is_tax: false,
   }
 
   const otherCostsLine: CostDetailLine | null =
@@ -177,14 +196,24 @@ export function calculateQuotation(input: EngineInput): EngineResult {
           sort_order: -1,
           consolidator_tariff_component_id: null,
           customs_agent_tariff_component_id: null,
+          is_tax: false,
         }
       : null
 
-  const totalCost = round(cif + agentResult.total, 4)
+  // El ISV (u otro componente marcado is_tax) se calcula sobre el CIF y se
+  // muestra en el desglose, pero no se suma al subtotal del agente aduanero.
+  // El CIF (FOB + Seguro + Otros costos internacionales + Flete) tampoco aporta
+  // nada al costo total — solo sirve de base para calcular ese impuesto y el %
+  // de nacionalización. El costo total real del servicio es flete/consolidador
+  // + agente aduanero (sin impuesto).
+  const agentSubtotalWithoutTax = round(agentResult.total - agentResult.taxTotal, 4)
+  const totalCost = round(consolidatorResult.total + agentSubtotalWithoutTax, 4)
   const salePrice = round(totalCost + input.marginAmount, 4)
   const marginPercentage = totalCost > 0 ? round((input.marginAmount / totalCost) * 100, 4) : 0
 
   const nationalizationBase = round(fob + consolidatorResult.total, 4)
+  // El % de nacionalización sigue basándose en el costo completo que cobra el
+  // agente (incluyendo el ISV), no en el subtotal ya neto de impuesto.
   const nationalizationPercentage =
     nationalizationBase > 0 ? round((agentResult.total / nationalizationBase) * 100, 4) : 0
 
@@ -197,7 +226,7 @@ export function calculateQuotation(input: EngineInput): EngineResult {
     other_international_costs: round(input.otherInternationalCosts, 4),
     subtotal_consolidator: consolidatorResult.total,
     cif,
-    subtotal_customs_agent: agentResult.total,
+    subtotal_customs_agent: agentSubtotalWithoutTax,
     total_cost: totalCost,
     margin_amount: round(input.marginAmount, 4),
     margin_percentage: marginPercentage,

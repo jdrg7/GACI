@@ -555,6 +555,9 @@ model CustomsAgentTariffComponent {
   sort_order  Int     @default(0)
   notes       String? @db.Text
   is_optional Boolean @default(false) // Cargos que no aplican en todos los casos
+  // Impuesto de paso (ej. ISV): se muestra en el desglose y se usa para calcular
+  // el % de nacionalización, pero NO se suma al total_cost de la cotización.
+  is_tax      Boolean @default(false)
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
@@ -744,6 +747,11 @@ model QuotationCostDetail {
   // Override manual (el usuario puede sobreescribir un cálculo con justificación)
   is_manual_override Boolean @default(false)
   override_reason    String? @db.Text
+
+  // Snapshot de CustomsAgentTariffComponent.is_tax al momento del cálculo — se
+  // guarda aquí (no solo en el componente) para que total_cost sea reproducible
+  // históricamente aunque el componente cambie is_tax más adelante.
+  is_tax Boolean @default(false)
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
