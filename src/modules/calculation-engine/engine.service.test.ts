@@ -167,7 +167,7 @@ const AGENT_COMPONENTS: TariffComponentLike[] = [
       { from: 300, to: null, type: 'block_ceil', base: 1200, rate: 50, block_size: 10, base_from: 300 },
     ],
   }),
-  comp({ id: 'isv', name: 'ISV', calculation_type: CalculationType.PER_VALUE, currencyCode: 'USD', rate_percentage: 0.15 }),
+  comp({ id: 'isv', name: 'ISV', calculation_type: CalculationType.PER_VALUE, currencyCode: 'USD', rate_percentage: 0.15, is_tax: true }),
 ]
 
 function product(overrides: Partial<QuotationProductInput>): QuotationProductInput {
@@ -232,19 +232,35 @@ describe('calculateQuotation — escenario aéreo (caso de negocio verificado en
     expect(insurance?.amount_usd).toBeCloseTo(result.insurance, 4)
   })
 
-  it('consistencia interna: total_cost = CIF + subtotal_customs_agent', () => {
-    expect(result.total_cost).toBeCloseTo(result.cif + result.subtotal_customs_agent, 4)
+  it('ISV está marcado is_tax: se muestra en el desglose pero no se suma al subtotal del agente ni al costo total', () => {
+    const isv = result.cost_details.find((c) => c.component_name === 'ISV')!
+    expect(isv.is_tax).toBe(true)
+  })
+
+  it('subtotal_customs_agent excluye el ISV (impuesto de solo visualización)', () => {
+    const agentLines = result.cost_details.filter((c) => c.category === 'CUSTOMS_AGENT')
+    const agentTotalWithTax = agentLines.reduce((sum, c) => sum + c.amount_usd, 0)
+    const isv = agentLines.find((c) => c.component_name === 'ISV')!
+    expect(result.subtotal_customs_agent).toBeCloseTo(agentTotalWithTax - isv.amount_usd, 4)
+  })
+
+  it('consistencia interna: total_cost = subtotal_consolidator + subtotal_customs_agent (el CIF no aporta nada al total)', () => {
+    expect(result.total_cost).toBeCloseTo(result.subtotal_consolidator + result.subtotal_customs_agent, 4)
+  })
+
+  it('el CIF no aporta nada al costo total: costo total NO incluye FOB, Seguro ni Otros costos internacionales', () => {
+    expect(result.total_cost).not.toBeCloseTo(result.cif + result.subtotal_customs_agent, 4)
   })
 
   it('consistencia interna: nationalization_base = FOB + subtotal_consolidator (NO el CIF completo)', () => {
     expect(result.nationalization_base).toBeCloseTo(result.fob + result.subtotal_consolidator, 4)
   })
 
-  it('consistencia interna: nationalization_percentage = subtotal_customs_agent / nationalization_base × 100', () => {
-    expect(result.nationalization_percentage).toBeCloseTo(
-      (result.subtotal_customs_agent / result.nationalization_base) * 100,
-      4,
-    )
+  it('consistencia interna: nationalization_percentage se basa en el costo completo del agente (incluyendo ISV)', () => {
+    const agentTotalWithTax = result.cost_details
+      .filter((c) => c.category === 'CUSTOMS_AGENT')
+      .reduce((sum, c) => sum + c.amount_usd, 0)
+    expect(result.nationalization_percentage).toBeCloseTo((agentTotalWithTax / result.nationalization_base) * 100, 4)
   })
 })
 
@@ -345,15 +361,27 @@ describe('recomputeTotalsFromCostDetails — usado al sobreescribir manualmente 
     expect(totals.nationalization_percentage).toBeCloseTo(engineResult.nationalization_percentage, 4)
   })
 
-  it('sobreescribir una línea del agente en +$100 sube subtotal_customs_agent y total_cost en +$100, pero no toca CIF', () => {
+  it('sobreescribir el ISV (is_tax) en +$100 NO afecta subtotal_customs_agent, total_cost ni sale_price (es un impuesto de solo visualización)', () => {
     const isvLine = engineResult.cost_details.find((c) => c.component_name === 'ISV')!
     const overridden = engineResult.cost_details.map((c) =>
       c === isvLine ? { ...c, amount_usd: c.amount_usd + 100 } : c,
     )
     const totals = recomputeTotalsFromCostDetails(engineResult.fob, engineResult.margin_amount, overridden)
 
-    expect(totals.subtotal_customs_agent).toBeCloseTo(engineResult.subtotal_customs_agent + 100, 4)
+    expect(totals.subtotal_customs_agent).toBeCloseTo(engineResult.subtotal_customs_agent, 4)
     expect(totals.cif).toBeCloseTo(engineResult.cif, 4) // ISV es CUSTOMS_AGENT, no afecta CIF
+    expect(totals.total_cost).toBeCloseTo(engineResult.total_cost, 4)
+    expect(totals.sale_price).toBeCloseTo(engineResult.sale_price, 4)
+  })
+
+  it('sobreescribir una línea del agente que NO es impuesto (Honorarios) en +$100 sí sube total_cost en +$100', () => {
+    const honorariosLine = engineResult.cost_details.find((c) => c.component_name === 'Honorarios Profesionales')!
+    const overridden = engineResult.cost_details.map((c) =>
+      c === honorariosLine ? { ...c, amount_usd: c.amount_usd + 100 } : c,
+    )
+    const totals = recomputeTotalsFromCostDetails(engineResult.fob, engineResult.margin_amount, overridden)
+
+    expect(totals.subtotal_customs_agent).toBeCloseTo(engineResult.subtotal_customs_agent + 100, 4)
     expect(totals.total_cost).toBeCloseTo(engineResult.total_cost + 100, 4)
     expect(totals.sale_price).toBeCloseTo(engineResult.sale_price + 100, 4)
   })

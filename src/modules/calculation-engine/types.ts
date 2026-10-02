@@ -51,6 +51,10 @@ export interface CostDetailLine extends ComponentCalculationResult {
   sort_order: number
   consolidator_tariff_component_id: string | null
   customs_agent_tariff_component_id: string | null
+  // Impuesto de paso (ej. ISV): se muestra en el desglose y alimenta el % de
+  // nacionalización, pero no se suma al total_cost. Siempre false para
+  // componentes de consolidador (el campo solo existe en CustomsAgentTariffComponent).
+  is_tax: boolean
 }
 
 export interface EngineResult {

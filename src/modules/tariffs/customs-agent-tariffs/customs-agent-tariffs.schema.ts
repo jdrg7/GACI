@@ -38,6 +38,9 @@ export const customsAgentTariffComponentSchema = tariffComponentValueSchema.and(
     sort_order: z.number().int().nonnegative().optional(),
     notes: z.string().trim().max(2000).optional(),
     is_optional: z.boolean().optional(),
+    // Impuesto de paso (ej. ISV): se muestra en el desglose y alimenta el cálculo
+    // de nacionalización, pero no se suma al total_cost de la cotización.
+    is_tax: z.boolean().optional(),
   }),
 )
 

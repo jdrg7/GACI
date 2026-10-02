@@ -475,7 +475,7 @@ async function reapplyTotalsFromCostDetails(
   const totals = recomputeTotalsFromCostDetails(
     fob,
     marginAmount,
-    allCostDetails.map((c) => ({ category: c.category, amount_usd: Number(c.amount_usd) })),
+    allCostDetails.map((c) => ({ category: c.category, amount_usd: Number(c.amount_usd), is_tax: c.is_tax })),
   )
 
   return tx.quotation.update({
