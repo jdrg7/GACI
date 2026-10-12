@@ -5,9 +5,8 @@ import { getPagination, buildPaginationMeta } from '../../../shared/utils/pagina
 import { pickDefined } from '../../../shared/utils/pick-defined'
 import { round } from '../../../shared/utils/round'
 import type { PaginatedResult } from '../../../shared/types/pagination'
+import { LB_PER_KG as KG_TO_LB } from '../../calculation-engine/constants'
 import type { CreateProductDTO, ListProductsQuery, UpdateProductDTO } from './products.schema'
-
-const KG_TO_LB = 2.20462
 
 async function findActiveOrThrow(id: string): Promise<Product> {
   const product = await prisma.product.findUnique({ where: { id } })
