@@ -18,7 +18,7 @@
 // duplicar datos.
 // ============================================================
 
-import { PrismaClient, CalculationType, CostCategory, ServiceLevel, TariffBasis, TransportType } from '@prisma/client'
+import { PrismaClient, CalculationType, CostCategory, TariffBasis, TransportType } from '@prisma/client'
 import * as bcrypt from 'bcrypt'
 
 const prisma = new PrismaClient()
@@ -205,22 +205,14 @@ async function main() {
 
   // ────────────────────────────────────────
   // 6a. TARIFA AÉREA PFI — Honduras 2026
-  // Fuente: "CALCULATOR TECNASA HONDURAS.xlsx" (PFI).
-  // Cada línea es MAX(tarifa × base, mínimo). La base aérea es el peso cobrable
-  // = MAX(peso real, peso volumétrico) → dos bases candidatas con la misma tarifa y mínimo.
-  // Air Freight tiene dos componentes: REGULAR ($1.85/kg, mín $210) y PRIORITY
-  // ($2.80/kg, mín $270); solo aplica el que coincide con el nivel de servicio.
-  // Todos los montos en USD.
+  // Unidad base: KG para la mayoría, LB para Delivery
+  // Todos los montos en USD
   // ────────────────────────────────────────
   console.log('  → Tarifa PFI Aéreo Honduras 2026...')
 
-  const PFI_AEREO_NOTES =
-    'Tarifas PFI para carga aérea Honduras según CALCULATOR TECNASA HONDURAS.xlsx. ' +
-    'Peso cobrable = MAX(peso real, peso volumétrico = CFT × 1728 / 166).'
-
   const pfiAereo = await prisma.consolidatorTariff.upsert({
     where: { id: '00000000-0000-4000-8000-000000000003' },
-    update: { notes: PFI_AEREO_NOTES, volumetric_divisor: 166 },
+    update: {},
     create: {
       id: '00000000-0000-4000-8000-000000000003',
       consolidator_id: pfi.id,
@@ -229,10 +221,9 @@ async function main() {
       name: 'PFI Aéreo Honduras 2026',
       valid_from: new Date('2026-01-01'),
       valid_until: null, // Vigente indefinidamente hasta nueva versión
-      volumetric_divisor: 166,
       is_active: true,
       created_by: adminUser.id,
-      notes: PFI_AEREO_NOTES,
+      notes: 'Tarifas PFI para carga aérea Honduras. Mínimo general: 50 KG.',
     },
   })
 
@@ -241,118 +232,121 @@ async function main() {
     where: { consolidator_tariff_id: pfiAereo.id },
   })
 
-  // Peso cobrable aéreo: se cobra el mayor entre kg reales y kg volumétricos.
-  const byWeight = (rate: number, minimum: number) => [
-    { basis: 'KG', rate, minimum },
-    { basis: 'VOL_KG', rate, minimum },
-  ]
-
   await prisma.consolidatorTariffComponent.createMany({
     data: [
+      // ── Air Freight: $210 hasta 50 KG, $1.85/KG adicional ──
+      // RANGE_KG con dos tramos
       {
         consolidator_tariff_id: pfiAereo.id,
         name: 'Air Freight',
-        calculation_type: CalculationType.MAX_OF,
+        calculation_type: CalculationType.RANGE_KG,
         currency_id: usd.id,
-        basis_candidates: byWeight(1.85, 210),
-        service_level: ServiceLevel.REGULAR,
+        tariff_ranges: [
+          { from: 0,  to: 50,   type: 'fixed',    amount: 210 },
+          { from: 50, to: null, type: 'base_plus', base: 210, rate: 1.85, base_from: 50 },
+        ],
         sort_order: 1,
-        notes: 'MAX(peso cobrable kg × $1.85, $210). Tarifa regular.',
+        notes: 'Mínimo $210 hasta 50 KG. Por encima: $210 + (kg-50) × $1.85',
       },
-      {
-        consolidator_tariff_id: pfiAereo.id,
-        name: 'Air Freight',
-        calculation_type: CalculationType.MAX_OF,
-        currency_id: usd.id,
-        basis_candidates: byWeight(2.8, 270),
-        service_level: ServiceLevel.PRIORITY,
-        sort_order: 2,
-        notes: 'MAX(peso cobrable kg × $2.80, $270). Tarifa Priority: reemplaza al Air Freight regular.',
-      },
+
+      // ── Fuel Surcharge: $50 hasta 50 KG, $0.55/KG adicional ──
       {
         consolidator_tariff_id: pfiAereo.id,
         name: 'Fuel Surcharge',
-        calculation_type: CalculationType.MAX_OF,
+        calculation_type: CalculationType.RANGE_KG,
         currency_id: usd.id,
-        basis_candidates: byWeight(0.55, 50),
-        sort_order: 3,
-        notes: 'MAX(peso cobrable kg × $0.55, $50)',
+        tariff_ranges: [
+          { from: 0,  to: 50,   type: 'fixed',    amount: 50 },
+          { from: 50, to: null, type: 'base_plus', base: 50, rate: 0.55, base_from: 50 },
+        ],
+        sort_order: 2,
+        notes: 'Mínimo $50 hasta 50 KG. Por encima: $50 + (kg-50) × $0.55',
       },
+
+      // ── Security Surcharge: MAX(KG × $0.15, $40) ──
       {
         consolidator_tariff_id: pfiAereo.id,
         name: 'Security Surcharge',
         calculation_type: CalculationType.MAX_OF,
         currency_id: usd.id,
-        basis_candidates: byWeight(0.15, 25),
-        sort_order: 4,
-        notes: 'MAX(peso cobrable kg × $0.15, $25)',
+        rate_per_unit: 0.15,   // $0.15 por KG
+        minimum_amount: 40.00, // Mínimo $40
+        basis_unit: TariffBasis.KG,
+        sort_order: 3,
+        notes: 'MAX(peso_kg × $0.15, $40)',
       },
+
+      // ── Screening Fee: MAX(KG × $0.12, $10) ──
       {
         consolidator_tariff_id: pfiAereo.id,
-        name: 'Cartage',
+        name: 'Screening Fee',
         calculation_type: CalculationType.MAX_OF,
         currency_id: usd.id,
-        basis_candidates: [
-          { basis: 'LB', rate: 0.04, minimum: 75 },
-          { basis: 'VOL_LB', rate: 0.04, minimum: 75 },
-        ],
-        sort_order: 5,
-        notes: 'MAX(MAX(lb reales, lb volumétricas) × $0.04, $75)',
+        rate_per_unit: 0.12,
+        minimum_amount: 10.00,
+        basis_unit: TariffBasis.KG,
+        sort_order: 4,
+        notes: 'MAX(peso_kg × $0.12, $10)',
       },
+
+      // ── Delivery: MAX(LB × $0.06, $75) — usa LIBRAS ──
+      {
+        consolidator_tariff_id: pfiAereo.id,
+        name: 'Delivery',
+        calculation_type: CalculationType.MAX_OF,
+        currency_id: usd.id,
+        rate_per_unit: 0.06,
+        minimum_amount: 75.00,
+        basis_unit: TariffBasis.LB,
+        sort_order: 5,
+        notes: 'MAX(peso_lb × $0.06, $75). Base: LIBRAS (no KG)',
+      },
+
+      // ── Forwarding Fee: $50 fijo por embarque ──
       {
         consolidator_tariff_id: pfiAereo.id,
         name: 'Forwarding Fee',
         calculation_type: CalculationType.FIXED,
         currency_id: usd.id,
-        fixed_amount: 50.0,
+        fixed_amount: 50.00,
         sort_order: 6,
         notes: '$50 fijo por embarque',
       },
+
+      // ── TSA Maintenance Fee: $55 fijo por embarque ──
       {
         consolidator_tariff_id: pfiAereo.id,
         name: 'TSA Maintenance Fee',
         calculation_type: CalculationType.FIXED,
         currency_id: usd.id,
-        fixed_amount: 55.0,
+        fixed_amount: 55.00,
         sort_order: 7,
         notes: '$55 fijo por embarque',
       },
+
+      // ── Accessorial: $25 fijo por embarque ──
       {
         consolidator_tariff_id: pfiAereo.id,
-        name: 'Fuel Index Surcharge',
-        calculation_type: CalculationType.MAX_OF,
+        name: 'Accessorial',
+        calculation_type: CalculationType.FIXED,
         currency_id: usd.id,
-        basis_candidates: byWeight(0.2, 20),
+        fixed_amount: 25.00,
         sort_order: 8,
-        notes: 'MAX(peso cobrable kg × $0.20, $20)',
-      },
-      {
-        consolidator_tariff_id: pfiAereo.id,
-        name: 'Screening Surcharge',
-        calculation_type: CalculationType.MAX_OF,
-        currency_id: usd.id,
-        basis_candidates: byWeight(0.12, 10),
-        sort_order: 9,
-        notes: 'MAX(peso cobrable kg × $0.12, $10)',
+        notes: '$25 fijo por embarque',
       },
     ],
   })
 
   // ────────────────────────────────────────
   // 6b. TARIFA MARÍTIMA PFI — Honduras 2026
-  // Fuente: "CALCULATOR TECNASA HONDURAS.xlsx" (PFI).
-  // Ocean Freight, Fuel y Security se calculan por CFT y por LB (cada una con su
-  // mínimo) y se cobra la mayor. Delivery es por LB real. Todos los montos en USD.
+  // Unidades: CFT para la mayoría, LB para Pick Up & Delivery
+  // Todos los montos en USD
   // ────────────────────────────────────────
   console.log('  → Tarifa PFI Marítimo Honduras 2026...')
 
-  const PFI_MARITIMO_NOTES =
-    'Tarifas PFI para carga marítima Honduras según CALCULATOR TECNASA HONDURAS.xlsx. ' +
-    'Líneas por volumen (CFT) o por peso (LB): se cobra la mayor.'
-
   const pfiMaritimo = await prisma.consolidatorTariff.upsert({
     where: { id: '00000000-0000-4000-8000-000000000004' },
-    update: { notes: PFI_MARITIMO_NOTES, volumetric_divisor: 166 },
+    update: {},
     create: {
       id: '00000000-0000-4000-8000-000000000004',
       consolidator_id: pfi.id,
@@ -361,10 +355,9 @@ async function main() {
       name: 'PFI Marítimo Honduras 2026',
       valid_from: new Date('2026-01-01'),
       valid_until: null,
-      volumetric_divisor: 166,
       is_active: true,
       created_by: adminUser.id,
-      notes: PFI_MARITIMO_NOTES,
+      notes: 'Tarifas PFI para carga marítima Honduras.',
     },
   })
 
@@ -374,82 +367,98 @@ async function main() {
 
   await prisma.consolidatorTariffComponent.createMany({
     data: [
+      // ── Ocean Freight: MAX(CFT × $3.00, $175) ──
       {
         consolidator_tariff_id: pfiMaritimo.id,
         name: 'Ocean Freight',
         calculation_type: CalculationType.MAX_OF,
         currency_id: usd.id,
-        basis_candidates: [
-          { basis: 'CFT', rate: 3.29, minimum: 221 },
-          { basis: 'LB', rate: 0.1, minimum: 221 },
-        ],
+        rate_per_unit: 3.00,
+        minimum_amount: 175.00,
+        basis_unit: TariffBasis.CFT,
         sort_order: 1,
-        notes: 'MAX(CFT × $3.29, lb × $0.10, $221)',
+        notes: 'MAX(volumen_cft × $3.00, $175)',
       },
+
+      // ── Bunker: MAX(CFT × $1.37, $75) ──
       {
         consolidator_tariff_id: pfiMaritimo.id,
-        name: 'Fuel Surcharge',
+        name: 'Bunker',
         calculation_type: CalculationType.MAX_OF,
         currency_id: usd.id,
-        basis_candidates: [
-          { basis: 'CFT', rate: 1.367, minimum: 50 },
-          { basis: 'LB', rate: 0.1, minimum: 50 },
-        ],
+        rate_per_unit: 1.37,
+        minimum_amount: 75.00,
+        basis_unit: TariffBasis.CFT,
         sort_order: 2,
-        notes: 'MAX(CFT × $1.367, lb × $0.10, $50)',
+        notes: 'MAX(volumen_cft × $1.37, $75)',
       },
+
+      // ── Security: MAX(CFT × $0.14, $50) ──
       {
         consolidator_tariff_id: pfiMaritimo.id,
         name: 'Security',
         calculation_type: CalculationType.MAX_OF,
         currency_id: usd.id,
-        basis_candidates: [
-          { basis: 'CFT', rate: 0.14, minimum: 50 },
-          { basis: 'LB', rate: 0.1, minimum: 50 },
-        ],
+        rate_per_unit: 0.14,
+        minimum_amount: 50.00,
+        basis_unit: TariffBasis.CFT,
         sort_order: 3,
-        notes: 'MAX(CFT × $0.14, lb × $0.10, $50)',
+        notes: 'MAX(volumen_cft × $0.14, $50). El Excel de referencia no aplicaba el mínimo, pero la regla documentada sí lo incluye.',
       },
+
+      // ── B/L Fee: $20 fijo ──
       {
         consolidator_tariff_id: pfiMaritimo.id,
         name: 'B/L Fee',
         calculation_type: CalculationType.FIXED,
         currency_id: usd.id,
-        fixed_amount: 20.0,
+        fixed_amount: 20.00,
         sort_order: 4,
         notes: '$20 fijo por embarque',
       },
+
+      // ── Forwarding Fee: $85 fijo ──
       {
         consolidator_tariff_id: pfiMaritimo.id,
         name: 'Forwarding Fee',
         calculation_type: CalculationType.FIXED,
         currency_id: usd.id,
-        fixed_amount: 85.0,
+        fixed_amount: 85.00,
         sort_order: 5,
         notes: '$85 fijo por embarque',
       },
+
+      // ── Accessorial: $25 fijo ──
       {
         consolidator_tariff_id: pfiMaritimo.id,
         name: 'Accessorial',
         calculation_type: CalculationType.FIXED,
         currency_id: usd.id,
-        fixed_amount: 25.0,
+        fixed_amount: 25.00,
         sort_order: 6,
         notes: '$25 fijo por embarque',
       },
+
+      // ── Pick Up & Delivery: progresivo por LIBRAS ──
+      // Tramo 1: ≤1,250 LB → $75 fijo
+      // Tramo 2: 1,251–2,083 LB → $125 fijo (sin importar el peso exacto en el tramo)
+      // Tramo 3: >2,083 LB → $125 + (lb - 2,083) × $0.06
       {
         consolidator_tariff_id: pfiMaritimo.id,
-        name: 'Delivery',
-        calculation_type: CalculationType.MAX_OF,
+        name: 'Pick Up & Delivery',
+        calculation_type: CalculationType.RANGE_LB,
         currency_id: usd.id,
-        rate_per_unit: 0.06,
-        minimum_amount: 125.0,
-        basis_unit: TariffBasis.LB,
+        tariff_ranges: [
+          { from: 0,    to: 1250, type: 'fixed',    amount: 75 },
+          { from: 1250, to: 2083, type: 'fixed',    amount: 125 },
+          { from: 2083, to: null, type: 'base_plus', base: 125, rate: 0.06, base_from: 2083 },
+        ],
         sort_order: 7,
-        notes: 'MAX(lb reales × $0.06, $125)',
+        notes: '≤1,250 LB: $75 | 1,251–2,083 LB: $125 | >2,083 LB: $125 + (lb-2,083)×$0.06',
       },
     ],
   })
+
   // ──────────────────────────────────────────────────────────
   // 7. AGENTE ADUANERO — Agente Base Honduras
   // ──────────────────────────────────────────────────────────
@@ -734,7 +743,7 @@ async function main() {
   console.log('   • 1 tipo de cambio USD→HNL L27.004 (2026-09-14)')
   console.log('   • 1 pallet estándar')
   console.log('   • 1 consolidador (PFI)')
-  console.log('     - Tarifa Aérea Honduras 2026  (9 componentes: Air Freight regular + Priority)')
+  console.log('     - Tarifa Aérea Honduras 2026  (8 componentes)')
   console.log('     - Tarifa Marítima Honduras 2026 (7 componentes)')
   console.log('   • 1 agente aduanero')
   console.log('     - Tarifa Honduras 2026 (13 componentes)')

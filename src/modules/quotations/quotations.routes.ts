@@ -13,7 +13,6 @@ import {
   listQuotationsQuerySchema,
   overrideCostDetailSchema,
   revertCostDetailSchema,
-  selectScenarioSchema,
   updateQuotationSchema,
 } from './quotations.schema'
 
@@ -55,14 +54,6 @@ router.patch(
   validate(idParamSchema, 'params'),
   validate(updateQuotationSchema),
   controller.update,
-)
-
-router.post(
-  '/:id/scenario',
-  authorize(Permission.QUOTATION_EDIT),
-  validate(idParamSchema, 'params'),
-  validate(selectScenarioSchema),
-  controller.selectScenario,
 )
 
 router.post(

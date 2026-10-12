@@ -5,14 +5,7 @@ import type { ComponentBasis, TariffComponentLike } from './types'
 
 const EXCHANGE_RATE = 27.004 // USD→HNL, tasa del caso de negocio verificado
 
-const ZERO_BASIS: ComponentBasis = {
-  weightKg: 0,
-  weightLb: 0,
-  volumeCft: 0,
-  volumetricWeightKg: 0,
-  volumetricWeightLb: 0,
-  cifUsd: 0,
-}
+const ZERO_BASIS: ComponentBasis = { weightKg: 0, weightLb: 0, volumeCft: 0, cifUsd: 0 }
 
 function component(overrides: Record<string, unknown>): TariffComponentLike {
   return {

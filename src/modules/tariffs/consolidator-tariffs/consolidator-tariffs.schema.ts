@@ -2,11 +2,7 @@ import { z } from 'zod'
 import { TransportType } from '@prisma/client'
 import { baseListQuerySchema } from '../../../shared/schemas/list-query.schema'
 import { booleanQueryParam } from '../../../shared/schemas/boolean-query.schema'
-import {
-  consolidatorComponentExtraObject,
-  refineTariffComponentValue,
-  tariffComponentValueObject,
-} from '../shared/tariff-component-value.schema'
+import { tariffComponentValueSchema } from '../shared/tariff-component-value.schema'
 
 export const listConsolidatorTariffsQuerySchema = baseListQuerySchema.extend({
   consolidator_id: z.string().uuid().optional(),
@@ -28,7 +24,6 @@ export const createConsolidatorTariffSchema = z.object({
   name: z.string().trim().min(1, 'El nombre es requerido').max(255),
   valid_from: z.coerce.date(),
   valid_until: z.coerce.date().optional(),
-  volumetric_divisor: z.number().positive().max(10000).optional(),
   notes: z.string().trim().max(2000).optional(),
 })
 
@@ -36,20 +31,18 @@ export const updateConsolidatorTariffSchema = z
   .object({
     name: z.string().trim().min(1).max(255).optional(),
     valid_until: z.coerce.date().optional(),
-    volumetric_divisor: z.number().positive().max(10000).optional(),
     notes: z.string().trim().max(2000).optional(),
     is_active: z.boolean().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, { message: 'No se envió ningún campo para actualizar' })
 
-export const consolidatorTariffComponentSchema = tariffComponentValueObject
-  .merge(consolidatorComponentExtraObject)
-  .extend({
+export const consolidatorTariffComponentSchema = tariffComponentValueSchema.and(
+  z.object({
     name: z.string().trim().min(1, 'El nombre es requerido').max(255),
     sort_order: z.number().int().nonnegative().optional(),
     notes: z.string().trim().max(2000).optional(),
-  })
-  .superRefine(refineTariffComponentValue)
+  }),
+)
 
 export const componentParamSchema = z.object({
   id: z.string().uuid('ID de tarifa inválido'),
