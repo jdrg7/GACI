@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { CalculationType, TariffBasis } from '@prisma/client'
 import { calculateQuotation, recomputeTotalsFromCostDetails } from './engine.service'
 import type { QuotationProductInput, TariffComponentLike } from './types'
@@ -190,7 +190,7 @@ describe('calculateQuotation — escenario aéreo (caso de negocio verificado en
 
   const result = calculateQuotation({
     products: [
-      product({ product_id: 'p1', weight_kg_used: 300, weight_lb_used: 661.38, volume_cft_used: 10, fob_unit_price: FOB, fob_total: FOB }),
+      product({ product_id: 'p1', weight_kg_used: 300, weight_lb_used: 661.386, volume_cft_used: 10, fob_unit_price: FOB, fob_total: FOB }),
     ],
     otherInternationalCosts: 0,
     marginAmount: 0,
@@ -269,7 +269,7 @@ describe('calculateQuotation — escenario marítimo (nunca probado antes end-to
   // 10 CFT → todos los MAX_OF marítimos caen en su mínimo (volumen bajo)
   const result = calculateQuotation({
     products: [
-      product({ product_id: 'p1', weight_kg_used: 500, weight_lb_used: 1102.3, volume_cft_used: 10, fob_unit_price: 5000, fob_total: 5000 }),
+      product({ product_id: 'p1', weight_kg_used: 500, weight_lb_used: 1102.31, volume_cft_used: 10, fob_unit_price: 5000, fob_total: 5000 }),
     ],
     otherInternationalCosts: 0,
     marginAmount: 0,
@@ -291,7 +291,7 @@ describe('calculateQuotation — escenario marítimo (nunca probado antes end-to
     const pickUp = result.cost_details.find((c) => c.component_name === 'Pick Up & Delivery')
     expect(pickUp?.original_amount).toBe(75)
     expect(pickUp?.calculation_basis).toBe('LB')
-    expect(pickUp?.basis_value).toBeCloseTo(1102.3, 2)
+    expect(pickUp?.basis_value).toBeCloseTo(1102.31, 2)
   })
 
   it('subtotal_consolidator = 175+75+50+20+85+25+75 = $505', () => {
@@ -308,8 +308,8 @@ describe('calculateQuotation — escenario marítimo (nunca probado antes end-to
 describe('calculateQuotation — multi-producto', () => {
   const result = calculateQuotation({
     products: [
-      product({ product_id: 'p1', weight_kg_used: 100, weight_lb_used: 220.46, volume_cft_used: 4, fob_unit_price: 2000, fob_total: 2000 }),
-      product({ product_id: 'p2', weight_kg_used: 200, weight_lb_used: 440.92, volume_cft_used: 6, fob_unit_price: 3000, fob_total: 3000 }),
+      product({ product_id: 'p1', weight_kg_used: 100, weight_lb_used: 220.462, volume_cft_used: 4, fob_unit_price: 2000, fob_total: 2000 }),
+      product({ product_id: 'p2', weight_kg_used: 200, weight_lb_used: 440.924, volume_cft_used: 6, fob_unit_price: 3000, fob_total: 3000 }),
     ],
     otherInternationalCosts: 50,
     marginAmount: 500,
@@ -339,7 +339,7 @@ describe('calculateQuotation — multi-producto', () => {
 describe('recomputeTotalsFromCostDetails — usado al sobreescribir manualmente una línea (is_manual_override)', () => {
   const engineResult = calculateQuotation({
     products: [
-      product({ product_id: 'p1', weight_kg_used: 300, weight_lb_used: 661.38, volume_cft_used: 10, fob_unit_price: 11847.5336, fob_total: 11847.5336 }),
+      product({ product_id: 'p1', weight_kg_used: 300, weight_lb_used: 661.386, volume_cft_used: 10, fob_unit_price: 11847.5336, fob_total: 11847.5336 }),
     ],
     otherInternationalCosts: 0,
     marginAmount: 1000,

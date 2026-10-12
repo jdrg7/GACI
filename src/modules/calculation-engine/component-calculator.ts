@@ -2,19 +2,17 @@ import { CalculationType, TariffBasis } from '@prisma/client'
 import { round } from '../../shared/utils/round'
 import { toUsd } from './currency.converter'
 import { applyTariffRanges, type TariffRangeItem } from './range-calculator'
-import type { CandidateBasis, ComponentBasis, ComponentCalculationResult, TariffComponentLike } from './types'
+import type { ComponentBasis, ComponentCalculationResult, TariffComponentLike } from './types'
 
 function toNumber(value: unknown): number {
   return value === null || value === undefined ? 0 : Number(value)
 }
 
-type Unit = CandidateBasis
+type Unit = 'KG' | 'LB' | 'CFT'
 
 function resolveBasisQuantity(unit: Unit, basis: ComponentBasis): number {
   if (unit === 'KG') return basis.weightKg
   if (unit === 'LB') return basis.weightLb
-  if (unit === 'VOL_KG') return basis.volumetricWeightKg
-  if (unit === 'VOL_LB') return basis.volumetricWeightLb
   return basis.volumeCft
 }
 
@@ -57,22 +55,6 @@ export function calculateComponent(
     }
 
     case CalculationType.MAX_OF: {
-      const candidates = component.basis_candidates
-      if (candidates && candidates.length > 0) {
-        const evaluated = candidates.map((candidate) => {
-          const quantity = resolveBasisQuantity(candidate.basis, basis)
-          const minimum = candidate.minimum ?? 0
-          const amount = Math.max(round(candidate.rate * quantity, 4), minimum)
-          return { basis: candidate.basis, rate: candidate.rate, quantity, minimum, amount }
-        })
-        const winner = evaluated.reduce((best, current) => (current.amount > best.amount ? current : best))
-        originalAmount = winner.amount
-        calculationBasis = winner.basis
-        basisValue = winner.quantity
-        snapshot = { type, candidates: evaluated, winner: winner.basis, result: originalAmount }
-        break
-      }
-
       const unit = unitForMaxOf(component.basis_unit)
       const quantity = resolveBasisQuantity(unit, basis)
       const rateResult = round(toNumber(component.rate_per_unit) * quantity, 4)
