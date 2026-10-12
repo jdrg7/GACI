@@ -58,12 +58,13 @@ El seed crea `admin@gaci.local` con la contraseña definida en `ADMIN_INITIAL_PA
 | `pnpm lint` / `pnpm format` | ESLint / Prettier |
 | `pnpm prisma:migrate` | Aplica migraciones (desarrollo) |
 | `pnpm prisma:studio` | Explorador visual de la BD |
-| `pnpm prisma:seed` | Ejecuta `prisma/seed.ts` (idempotente) |
+| `pnpm prisma:seed` | Ejecuta `prisma/seed.ts` (datos base y tarifas; solo desarrollo) |
+| `pnpm prisma:samples` | Productos y cotizaciones de ejemplo; `--reset` borra todas las cotizaciones antes |
+| `pnpm test` | Suite de pruebas (motor de cálculo, paridad con el Excel de PFI, escenarios) |
 
-## Estado del proyecto
+## Documentación
 
-Fase actual: **estructura base + infraestructura** (config, errores, servidor mínimo,
-Prisma + seed validados). La lógica de negocio de los módulos
-(`auth`, `users`, `quotations`, `master-data`, `calculation-engine`) se implementa
-en fases siguientes, módulo por módulo. Ver `GACI-Architecture.md` en la raíz del
-repositorio del proyecto para el diseño completo.
+- [Cálculo de flete y cotizaciones multimodo (PFI)](docs/calculo-flete-pfi.md): reglas del
+  consolidador, modelo de escenarios, API, operación y verificación.
+- `GACI-Architecture.md` en la raíz del proyecto: diseño general (su sección de cálculo fue
+  superada por el documento anterior).

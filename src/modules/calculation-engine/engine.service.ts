@@ -1,8 +1,16 @@
 import { CostCategory } from '@prisma/client'
 import { round } from '../../shared/utils/round'
 import { calculateComponent } from './component-calculator'
+import { DEFAULT_VOLUMETRIC_DIVISOR, IN3_PER_CFT, LB_PER_KG } from './constants'
 import { calculateInsurance } from './insurance.calculator'
-import type { ComponentBasis, CostDetailLine, EngineInput, EngineResult, TariffComponentLike } from './types'
+import type {
+  ComponentBasis,
+  CostDetailLine,
+  EngineInput,
+  EngineResult,
+  ServiceLevel,
+  TariffComponentLike,
+} from './types'
 
 function isConsolidatorComponent(
   component: TariffComponentLike,
@@ -115,19 +123,24 @@ export function recomputeTotalsFromCostDetails(
   }
 }
 
+// Un componente con service_level solo aplica cuando la cotización tiene ese nivel
+// (ej. Air Freight Priority reemplaza al Air Freight regular); sin service_level aplica a ambos.
+function filterByServiceLevel(components: TariffComponentLike[], level: ServiceLevel): TariffComponentLike[] {
+  return components.filter((c) => c.service_level == null || c.service_level === level)
+}
+
 export function calculateQuotation(input: EngineInput): EngineResult {
-  const totalWeightKg = round(
-    input.products.reduce((sum, p) => sum + p.weight_kg_used, 0),
-    3,
-  )
-  const totalWeightLb = round(
-    input.products.reduce((sum, p) => sum + p.weight_lb_used, 0),
-    3,
-  )
-  const totalVolumeCft = round(
-    input.products.reduce((sum, p) => sum + p.volume_cft_used, 0),
-    3,
-  )
+  // El peso real base es la libra (como el calculador de PFI); el kg se deriva de ella.
+  const rawWeightLb = input.products.reduce((sum, p) => sum + p.weight_lb_used, 0)
+  const rawVolumeCft = input.products.reduce((sum, p) => sum + p.volume_cft_used, 0)
+  const rawVolumetricLb = (rawVolumeCft * IN3_PER_CFT) / (input.volumetricDivisor ?? DEFAULT_VOLUMETRIC_DIVISOR)
+
+  const totalWeightLb = round(rawWeightLb, 3)
+  const totalWeightKg = round(rawWeightLb / LB_PER_KG, 3)
+  const totalVolumeCft = round(rawVolumeCft, 3)
+  const volumetricWeightLb = round(rawVolumetricLb, 3)
+  const volumetricWeightKg = round(rawVolumetricLb / LB_PER_KG, 3)
+  const serviceLevel: ServiceLevel = input.serviceLevel ?? 'REGULAR'
   const fob = round(
     input.products.reduce((sum, p) => sum + p.fob_total, 0),
     4,
@@ -137,14 +150,18 @@ export function calculateQuotation(input: EngineInput): EngineResult {
 
   // Primera pasada: se necesita subtotal_consolidator antes de poder calcular
   // los componentes del agente basados en CIF (ISV, Honorarios, Manejo de Mercadería).
+  // Las bases de cobro usan los valores físicos SIN redondear (como el Excel de PFI);
+  // los totales redondeados a 3 decimales son solo lo que se guarda y se muestra.
   const basisForConsolidator: ComponentBasis = {
-    weightKg: totalWeightKg,
-    weightLb: totalWeightLb,
-    volumeCft: totalVolumeCft,
+    weightKg: rawWeightLb / LB_PER_KG,
+    weightLb: rawWeightLb,
+    volumeCft: rawVolumeCft,
+    volumetricWeightKg: rawVolumetricLb / LB_PER_KG,
+    volumetricWeightLb: rawVolumetricLb,
     cifUsd: 0, // el consolidador nunca calcula sobre CIF
   }
   const consolidatorResult = calculateComponents(
-    input.consolidatorComponents,
+    filterByServiceLevel(input.consolidatorComponents, serviceLevel),
     CostCategory.CONSOLIDATOR,
     basisForConsolidator,
     input.exchangeRateUsdToHnl,
@@ -152,12 +169,8 @@ export function calculateQuotation(input: EngineInput): EngineResult {
 
   const cif = round(fob + consolidatorResult.total + insurance + input.otherInternationalCosts, 4)
 
-  const basisForAgent: ComponentBasis = {
-    weightKg: totalWeightKg,
-    weightLb: totalWeightLb,
-    volumeCft: totalVolumeCft,
-    cifUsd: cif,
-  }
+  // El agente aduanero cobra sobre peso real, nunca sobre el cobrable/volumétrico.
+  const basisForAgent: ComponentBasis = { ...basisForConsolidator, cifUsd: cif }
   const agentResult = calculateComponents(
     input.customsAgentComponents,
     CostCategory.CUSTOMS_AGENT,
@@ -221,6 +234,10 @@ export function calculateQuotation(input: EngineInput): EngineResult {
     total_weight_kg: totalWeightKg,
     total_weight_lb: totalWeightLb,
     total_volume_cft: totalVolumeCft,
+    volumetric_weight_lb: volumetricWeightLb,
+    volumetric_weight_kg: volumetricWeightKg,
+    chargeable_weight_lb: Math.max(totalWeightLb, volumetricWeightLb),
+    chargeable_weight_kg: Math.max(totalWeightKg, volumetricWeightKg),
     fob,
     insurance,
     other_international_costs: round(input.otherInternationalCosts, 4),
