@@ -10,6 +10,7 @@ import type {
   ListQuotationsQuery,
   OverrideCostDetailDTO,
   RevertCostDetailDTO,
+  SelectScenarioDTO,
   UpdateQuotationDTO,
 } from './quotations.schema'
 
@@ -60,6 +61,14 @@ export async function update(req: Request, res: Response): Promise<void> {
   const { id } = req.params as { id: string }
   const input = req.body as UpdateQuotationDTO
   const quotation = await quotationsService.updateQuotation(id, input, user)
+  sendSuccess(res, stripOpp(quotation, user.permissions.includes(Permission.QUOTATION_VIEW_OPP)))
+}
+
+export async function selectScenario(req: Request, res: Response): Promise<void> {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const input = req.body as SelectScenarioDTO
+  const quotation = await quotationsService.selectQuotationScenario(id, input, user)
   sendSuccess(res, stripOpp(quotation, user.permissions.includes(Permission.QUOTATION_VIEW_OPP)))
 }
 

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { QuotationStatus, TransportType } from '@prisma/client'
+import { QuotationStatus, ServiceLevel, TransportType } from '@prisma/client'
 import { baseListQuerySchema } from '../../shared/schemas/list-query.schema'
 
 const quotationProductSchema = z.object({
@@ -15,13 +15,17 @@ export const createQuotationSchema = z.object({
   opportunity_id: z.number().int().positive().optional(),
   client_id: z.string().uuid('Cliente inválido'),
   country_id: z.string().uuid('País inválido'),
-  transport_type: z.nativeEnum(TransportType),
+  // Opcional: se calculan todos los modos con tarifa vigente. Si se envía, queda como el
+  // modo elegido; si no, se elige el más barato hasta que el comercial decida.
+  transport_type: z.nativeEnum(TransportType).optional(),
+  // Solo cambia el escenario aéreo (Air Freight Priority).
+  service_level: z.nativeEnum(ServiceLevel).default(ServiceLevel.REGULAR),
   consolidator_id: z.string().uuid('Consolidador inválido'),
   customs_agent_id: z.string().uuid('Agente aduanero inválido'),
   pallet_id: z.string().uuid().optional(),
   products: z.array(quotationProductSchema).min(1, 'Debe incluir al menos un producto'),
-  other_international_costs: z.number().nonnegative().default(0),
-  margin_amount: z.number().nonnegative('El margen no puede ser negativo'),
+  // El margen está oculto en la UI por ahora: es opcional y por defecto 0 (precio de venta = costo total).
+  margin_amount: z.number().nonnegative('El margen no puede ser negativo').default(0),
   // IDs de CustomsAgentTariffComponent con is_optional=true que NO deben aplicar
   // en esta cotización puntual. Un componente no opcional en la lista es un error.
   excluded_component_ids: z.array(z.string().uuid()).optional(),
@@ -32,8 +36,8 @@ export const createQuotationSchema = z.object({
 export const updateQuotationSchema = z
   .object({
     products: z.array(quotationProductSchema).min(1).optional(),
-    other_international_costs: z.number().nonnegative().optional(),
     margin_amount: z.number().nonnegative().optional(),
+    service_level: z.nativeEnum(ServiceLevel).optional(),
     excluded_component_ids: z.array(z.string().uuid()).optional(),
     observations: z.string().trim().max(2000).optional(),
     internal_notes: z.string().trim().max(2000).optional(),
@@ -44,9 +48,16 @@ export const updateQuotationSchema = z
     { message: 'No se envió ningún campo para actualizar' },
   )
 
+export const selectScenarioSchema = z.object({
+  transport_type: z.nativeEnum(TransportType),
+  reason: z.string().trim().max(2000).optional(),
+})
+
 export const changeStateSchema = z.object({
   to_status: z.nativeEnum(QuotationStatus),
   reason: z.string().trim().max(2000).optional(),
+  // Modo de transporte que se envía (ENVIADA) o que aceptó el cliente (GANADA).
+  transport_type: z.nativeEnum(TransportType).optional(),
 })
 
 export const listQuotationsQuerySchema = baseListQuerySchema.extend({
@@ -76,6 +87,7 @@ export const revertCostDetailSchema = z.object({
 export type QuotationProductInputDTO = z.infer<typeof quotationProductSchema>
 export type CreateQuotationDTO = z.infer<typeof createQuotationSchema>
 export type UpdateQuotationDTO = z.infer<typeof updateQuotationSchema>
+export type SelectScenarioDTO = z.infer<typeof selectScenarioSchema>
 export type ChangeStateDTO = z.infer<typeof changeStateSchema>
 export type ListQuotationsQuery = z.infer<typeof listQuotationsQuerySchema>
 export type CompareQuery = z.infer<typeof compareQuerySchema>
