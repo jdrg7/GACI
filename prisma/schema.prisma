@@ -124,6 +124,13 @@ enum TariffBasis {
   CFT
 }
 
+// Nivel de servicio del consolidador. Un componente con service_level solo aplica
+// cuando la cotización tiene ese nivel (ej. Air Freight Priority); NULL = aplica a ambos.
+enum ServiceLevel {
+  REGULAR
+  PRIORITY
+}
+
 // ============================================================
 // GRUPO 1 — SEGURIDAD Y ACCESO
 // ============================================================
@@ -313,8 +320,8 @@ model Product {
   sku          String?   @unique @db.VarChar(100)
   supplier_id  String?   @db.Uuid
   weight_kg    Decimal   @db.Decimal(10, 3) // Peso base del catálogo en KG
-  weight_lb    Decimal   @db.Decimal(10, 3) // weight_kg × 2.20462 — almacenado para evitar recalcular
-  volume_cft   Decimal   @db.Decimal(10, 3) // Volumen base del catálogo en CFT
+  weight_lb    Decimal   @db.Decimal(10, 3) // weight_kg × 2.2046 — almacenado para evitar recalcular
+  volume_cft   Decimal   @db.Decimal(12, 6) // Volumen base del catálogo en CFT
   customs_code String?   @db.VarChar(50)    // Código arancelario / aduanero
   is_active    Boolean   @default(true)
   deleted_at   DateTime?
@@ -386,7 +393,7 @@ model Pallet {
   length_cm     Decimal @db.Decimal(8, 2)
   width_cm      Decimal @db.Decimal(8, 2)
   height_cm     Decimal @db.Decimal(8, 2)
-  volume_cft    Decimal @db.Decimal(10, 3)
+  volume_cft    Decimal @db.Decimal(12, 6)
   is_active     Boolean @default(true)
 
   created_at DateTime @default(now())
@@ -455,6 +462,10 @@ model ConsolidatorTariff {
   notes           String?       @db.Text
   is_active       Boolean       @default(true)
 
+  // Pulgadas cúbicas por libra volumétrica (peso volumétrico = CFT × 1728 / divisor).
+  // PFI usa 166 (equivale a 6,000 cm³/kg). Es un dato de la tarifa, no una constante del código.
+  volumetric_divisor Decimal @default(166) @db.Decimal(8, 2)
+
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
   created_by String   @db.Uuid  // user_id — sin FK (tabla de referencia)
@@ -464,6 +475,7 @@ model ConsolidatorTariff {
   country      Country                       @relation(fields: [country_id],       references: [id])
   components   ConsolidatorTariffComponent[]
   quotations   Quotation[]
+  scenarios    QuotationScenario[]
 
   @@index([consolidator_id, country_id, transport_type, valid_from])
   @@index([is_active, valid_from, valid_until])
@@ -491,7 +503,16 @@ model ConsolidatorTariffComponent {
   minimum_amount  Decimal? @db.Decimal(12, 4) // Para MAX_OF
   maximum_amount  Decimal? @db.Decimal(12, 4) // Límite superior si aplica (no usado en PFI actual)
   tariff_ranges   Json?                        // Para RANGE_KG, RANGE_LB, RANGE_CFT, RANGE_VALUE
-  basis_unit      TariffBasis?                 // Requerido solo para MAX_OF (kg/lb/cft)
+  basis_unit      TariffBasis?                 // Requerido solo para MAX_OF de una sola base (kg/lb/cft)
+
+  // MAX_OF multi-base: el componente cobra el MAYOR entre varias bases candidatas,
+  // cada una con su tarifa y mínimo — [{ basis: 'CFT'|'LB'|'KG'|'VOL_KG'|'VOL_LB', rate, minimum? }].
+  // Si viene, reemplaza a rate_per_unit/minimum_amount/basis_unit.
+  // Ej. Ocean Freight PFI: [{CFT, 3.29, 221}, {LB, 0.10, 221}].
+  basis_candidates Json?
+
+  // NULL = aplica a ambos niveles; REGULAR/PRIORITY = solo cuando la cotización tiene ese nivel.
+  service_level ServiceLevel?
 
   sort_order Int     @default(0)
   notes      String? @db.Text
@@ -578,7 +599,16 @@ model Quotation {
   reference_number String          @unique @db.VarChar(50)  // Autogenerado: GACI-2026-0001
   opportunity_id   Int?                                      // Número OPP ConnectWise (manual, sin integración)
   status           QuotationStatus @default(BORRADOR)
+
+  // Modo de transporte ELEGIDO. La cotización calcula todos los modos disponibles
+  // (QuotationScenario); los totales de abajo reflejan el escenario elegido.
   transport_type   TransportType
+
+  // Nivel de servicio del consolidador (Regular/Priority). Solo cambia el escenario aéreo.
+  service_level    ServiceLevel    @default(REGULAR)
+
+  // false = el escenario elegido es el más barato por defecto; true = lo eligió el comercial.
+  scenario_chosen  Boolean         @default(false)
 
   // Entidades seleccionadas
   client_id         String @db.Uuid
@@ -602,7 +632,7 @@ model Quotation {
   // Totales físicos calculados a partir de QuotationProduct
   total_weight_kg  Decimal @db.Decimal(10, 3)
   total_weight_lb  Decimal @db.Decimal(10, 3)
-  total_volume_cft Decimal @db.Decimal(10, 3)
+  total_volume_cft Decimal @db.Decimal(12, 6)
 
   // Costos en USD — todos almacenados como resultado final en USD
   // El desglose completo está en QuotationCostDetail
@@ -654,6 +684,7 @@ model Quotation {
   responsible_user     User               @relation("QuotationResponsible", fields: [responsible_user_id], references: [id])
 
   products            QuotationProduct[]
+  scenarios           QuotationScenario[]
   cost_details        QuotationCostDetail[]
   documents           QuotationDocument[]
   audit_state_changes AuditStateChange[]
@@ -681,12 +712,12 @@ model QuotationProduct {
   // Si son NULL → se usan los valores del catálogo (product.weight_kg, etc.)
   weight_kg_override  Decimal? @db.Decimal(10, 3)
   weight_lb_override  Decimal? @db.Decimal(10, 3)
-  volume_cft_override Decimal? @db.Decimal(10, 3)
+  volume_cft_override Decimal? @db.Decimal(12, 6)
 
   // Valores efectivamente usados en el cálculo (catálogo o override × quantity)
   weight_kg_used  Decimal @db.Decimal(10, 3)
   weight_lb_used  Decimal @db.Decimal(10, 3)
-  volume_cft_used Decimal @db.Decimal(10, 3)
+  volume_cft_used Decimal @db.Decimal(12, 6)
 
   // FOB de este producto en esta cotización
   fob_unit_price Decimal @db.Decimal(14, 4)
@@ -703,6 +734,43 @@ model QuotationProduct {
   @@index([quotation_id])
   @@index([product_id])
   @@map("quotation_product")
+}
+
+// Un escenario de transporte de una cotización (Aéreo o Marítimo), con sus propios
+// totales. Una cotización calcula todos los modos que tengan tarifa vigente y el
+// comercial elige cuál usar (Quotation.transport_type). La tarifa del consolidador
+// queda congelada por escenario.
+model QuotationScenario {
+  id                     String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quotation_id           String        @db.Uuid
+  transport_type         TransportType
+  consolidator_tariff_id String        @db.Uuid
+
+  // Pesos informativos (derivan del volumen y del divisor de la tarifa)
+  volumetric_weight_lb Decimal @db.Decimal(14, 3)
+  chargeable_weight_kg Decimal @db.Decimal(14, 3)
+
+  subtotal_consolidator      Decimal @db.Decimal(14, 4)
+  cif                        Decimal @db.Decimal(14, 4)
+  subtotal_customs_agent     Decimal @db.Decimal(14, 4)
+  total_cost                 Decimal @db.Decimal(14, 4)
+  margin_amount              Decimal @db.Decimal(14, 4)
+  margin_percentage          Decimal @db.Decimal(8, 4)
+  sale_price                 Decimal @db.Decimal(14, 4)
+  nationalization_base       Decimal @db.Decimal(14, 4)
+  nationalization_percentage Decimal @db.Decimal(8, 4)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relaciones
+  quotation           Quotation             @relation(fields: [quotation_id], references: [id])
+  consolidator_tariff ConsolidatorTariff    @relation(fields: [consolidator_tariff_id], references: [id])
+  cost_details        QuotationCostDetail[]
+
+  @@unique([quotation_id, transport_type])
+  @@index([quotation_id])
+  @@map("quotation_scenario")
 }
 
 // Detalle inmutable de cada línea de costo calculada en la cotización.
@@ -722,6 +790,8 @@ model QuotationProduct {
 model QuotationCostDetail {
   id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   quotation_id   String       @db.Uuid
+  // Escenario (modo de transporte) al que pertenece la línea.
+  scenario_id    String?      @db.Uuid
   category       CostCategory
   component_name String       @db.VarChar(255)
   sort_order     Int          @default(0)
@@ -757,10 +827,12 @@ model QuotationCostDetail {
   updated_at DateTime @updatedAt
 
   // Relaciones
-  quotation Quotation @relation(fields: [quotation_id], references: [id])
+  quotation Quotation          @relation(fields: [quotation_id], references: [id])
+  scenario  QuotationScenario? @relation(fields: [scenario_id], references: [id])
 
   @@index([quotation_id, category])
   @@index([quotation_id, sort_order])
+  @@index([scenario_id])
   @@map("quotation_cost_detail")
 }
 
