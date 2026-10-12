@@ -81,7 +81,11 @@ export async function createTariff(
       name: input.name,
       valid_from: input.valid_from,
       created_by: createdBy,
-      ...pickDefined({ valid_until: input.valid_until, notes: input.notes }),
+      ...pickDefined({
+        valid_until: input.valid_until,
+        volumetric_divisor: input.volumetric_divisor,
+        notes: input.notes,
+      }),
     },
   })
 }
@@ -124,6 +128,8 @@ export async function addComponent(
         maximum_amount: input.maximum_amount,
         tariff_ranges: input.tariff_ranges,
         basis_unit: input.basis_unit,
+        basis_candidates: input.basis_candidates,
+        service_level: input.service_level,
         notes: input.notes,
       }),
     },
@@ -163,6 +169,8 @@ export async function updateComponent(
       maximum_amount: input.maximum_amount ?? null,
       tariff_ranges: input.tariff_ranges ?? Prisma.JsonNull,
       basis_unit: input.basis_unit ?? null,
+      basis_candidates: input.basis_candidates ?? Prisma.JsonNull,
+      service_level: input.service_level ?? null,
       ...pickDefined({ sort_order: input.sort_order, notes: input.notes }),
     },
   })
