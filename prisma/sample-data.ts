@@ -13,10 +13,9 @@
 // ============================================================
 
 import { PrismaClient, QuotationStatus, Role, ServiceLevel } from '@prisma/client'
+import { basename } from 'node:path'
 import { changeQuotationState, createQuotation } from '../src/modules/quotations/quotations.service'
 import type { CreateQuotationDTO } from '../src/modules/quotations/quotations.schema'
-
-const prisma = new PrismaClient()
 
 const LB_PER_KG = 2.2046
 const PFI_ID = '00000000-0000-4000-8000-000000000002'
@@ -31,12 +30,12 @@ interface SampleProduct {
 }
 
 const PRODUCTS: SampleProduct[] = [
-  { sku: 'SAMPLE-PANEL-55x33x7', name: 'Panel plano 55×33×7 in (49 lb)', lb: 49, dims: [55, 33, 7] },
-  { sku: 'SAMPLE-BOX-24x24x10', name: 'Caja 24×24×10 in (15 lb)', lb: 15, dims: [24, 24, 10] },
-  { sku: 'SAMPLE-BOX-12x12x12', name: 'Caja 12×12×12 in (10 lb)', lb: 10, dims: [12, 12, 12] },
-  { sku: 'SAMPLE-CRATE-24x24x20', name: 'Caja densa 24×24×20 in (125 lb)', lb: 125, dims: [24, 24, 20] },
-  { sku: 'SAMPLE-BULKY-48x40x40', name: 'Bulto liviano 48×40×40 in (30 lb)', lb: 30, dims: [48, 40, 40] },
-  { sku: 'SAMPLE-HEAVY-40x30x30', name: 'Caja pesada 40×30×30 in (250 lb)', lb: 250, dims: [40, 30, 30] },
+  { sku: 'SAMPLE-PANEL-55x33x7', name: 'TECNASA — Panel 55×33×7 in (49 lb)', lb: 49, dims: [55, 33, 7] },
+  { sku: 'SAMPLE-BOX-24x24x10', name: 'TECNASA — Caja 24×24×10 in (15 lb)', lb: 15, dims: [24, 24, 10] },
+  { sku: 'SAMPLE-BOX-12x12x12', name: 'TECNASA — Caja 12×12×12 in (10 lb)', lb: 10, dims: [12, 12, 12] },
+  { sku: 'SAMPLE-CRATE-24x24x20', name: 'Demo — Caja densa 24×24×20 in (125 lb)', lb: 125, dims: [24, 24, 20] },
+  { sku: 'SAMPLE-BULKY-48x40x40', name: 'Demo — Bulto liviano 48×40×40 in (30 lb)', lb: 30, dims: [48, 40, 40] },
+  { sku: 'SAMPLE-HEAVY-40x30x30', name: 'Demo — Caja pesada 40×30×30 in (250 lb)', lb: 250, dims: [40, 30, 30] },
 ]
 
 interface SampleQuotation {
@@ -83,7 +82,7 @@ const QUOTATIONS: SampleQuotation[] = [
   },
 ]
 
-async function resetQuotations(): Promise<void> {
+async function resetQuotations(prisma: PrismaClient): Promise<void> {
   await prisma.$transaction([
     prisma.auditDataChange.deleteMany(),
     prisma.auditStateChange.deleteMany(),
@@ -96,14 +95,48 @@ async function resetQuotations(): Promise<void> {
   console.log('  → Cotizaciones anteriores eliminadas')
 }
 
-async function main(): Promise<void> {
-  if (process.argv.includes('--reset')) await resetQuotations()
+export async function seedSampleData(prisma: PrismaClient, resetAll = false): Promise<void> {
+  if (resetAll) {
+    await resetQuotations(prisma)
+  } else {
+    const sampleLabels = QUOTATIONS.map((quotation) => quotation.label)
+    const existing = await prisma.quotation.findMany({
+      where: { observations: { in: sampleLabels } },
+      select: { id: true },
+    })
+    const ids = existing.map((quotation) => quotation.id)
+    if (ids.length > 0) {
+      await prisma.auditDataChange.deleteMany({ where: { quotation_id: { in: ids } } })
+      await prisma.auditStateChange.deleteMany({ where: { quotation_id: { in: ids } } })
+      await prisma.quotationDocument.deleteMany({ where: { quotation_id: { in: ids } } })
+      await prisma.quotationCostDetail.deleteMany({ where: { quotation_id: { in: ids } } })
+      await prisma.quotationScenario.deleteMany({ where: { quotation_id: { in: ids } } })
+      await prisma.quotationProduct.deleteMany({ where: { quotation_id: { in: ids } } })
+      await prisma.quotation.deleteMany({ where: { id: { in: ids } } })
+    }
+  }
 
-  const [admin, honduras, client] = await Promise.all([
+  const [admin, honduras] = await Promise.all([
     prisma.user.findUniqueOrThrow({ where: { email: 'admin@gaci.local' } }),
     prisma.country.findFirstOrThrow({ where: { name: 'Honduras' } }),
-    prisma.client.findFirstOrThrow({ where: { deleted_at: null }, orderBy: { created_at: 'asc' } }),
   ])
+  const client = await prisma.client.upsert({
+    where: { id: '00000000-0000-4000-8000-000000000101' },
+    update: { name: 'TECNASA Honduras', country_id: honduras.id, is_active: true, deleted_at: null },
+    create: {
+      id: '00000000-0000-4000-8000-000000000101',
+      name: 'TECNASA Honduras',
+      tax_id: 'DEMO-TECNASA-01',
+      email: 'compras@tecnasa.example',
+      country_id: honduras.id,
+    },
+  })
+
+  const supplier = await prisma.supplier.upsert({
+    where: { id: '00000000-0000-4000-8000-000000000201' },
+    update: { name: 'TECNASA', country: 'Honduras', is_active: true, deleted_at: null },
+    create: { id: '00000000-0000-4000-8000-000000000201', name: 'TECNASA', country: 'Honduras' },
+  })
 
   console.log('  → Productos de ejemplo...')
   const productIds = new Map<string, string>()
@@ -111,6 +144,7 @@ async function main(): Promise<void> {
     const [l, w, h] = p.dims
     const data = {
       name: p.name,
+      supplier_id: supplier.id,
       weight_lb: p.lb,
       weight_kg: Math.round((p.lb / LB_PER_KG) * 1000) / 1000,
       volume_cft: Math.round(((l * w * h) / 1728) * 1_000_000) / 1_000_000,
@@ -170,10 +204,13 @@ async function main(): Promise<void> {
   }
 }
 
-main()
-  .then(() => console.log('✅ Datos de ejemplo cargados'))
-  .catch((error) => {
-    console.error(error)
-    process.exitCode = 1
-  })
-  .finally(() => prisma.$disconnect())
+if (basename(process.argv[1] ?? '') === 'sample-data.ts') {
+  const prisma = new PrismaClient()
+  seedSampleData(prisma, process.argv.includes('--reset'))
+    .then(() => console.log('✅ Datos de ejemplo cargados'))
+    .catch((error) => {
+      console.error(error)
+      process.exitCode = 1
+    })
+    .finally(() => prisma.$disconnect())
+}

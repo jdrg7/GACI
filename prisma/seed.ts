@@ -20,6 +20,7 @@
 
 import { PrismaClient, CalculationType, CostCategory, ServiceLevel, TariffBasis, TransportType } from '@prisma/client'
 import * as bcrypt from 'bcrypt'
+import { seedSampleData } from './sample-data'
 
 const prisma = new PrismaClient()
 
@@ -65,12 +66,6 @@ async function main() {
     where: { code: 'PAB' },
     update: {},
     create: { code: 'PAB', name: 'Balboa Panameño', symbol: 'B/.' },
-  })
-
-  const usd_sv = await prisma.currency.upsert({
-    where: { code: 'USD' }, // El Salvador usa USD
-    update: {},
-    create: { code: 'USD', name: 'Dólar Estadounidense', symbol: '$' },
   })
 
   // ──────────────────────────────────────────────────────────
@@ -142,6 +137,32 @@ async function main() {
       is_active: true,
     },
   })
+
+  // Catálogo de demostración para que las cotizaciones y pantallas tengan datos.
+  const sampleClients = [
+    { id: '00000000-0000-4000-8000-000000000101', name: 'TECNASA Honduras', tax_id: 'DEMO-TECNASA-01', email: 'compras@tecnasa.example' },
+    { id: '00000000-0000-4000-8000-000000000102', name: 'Distribuidora Central HN', tax_id: 'DEMO-CLIENTE-02', email: 'logistica@central.example' },
+    { id: '00000000-0000-4000-8000-000000000103', name: 'Soluciones IT Honduras', tax_id: 'DEMO-CLIENTE-03', email: 'importaciones@solucionesit.example' },
+    { id: '00000000-0000-4000-8000-000000000104', name: 'Comercializadora del Norte', tax_id: 'DEMO-CLIENTE-04', email: 'compras@norte.example' },
+    { id: '00000000-0000-4000-8000-000000000105', name: 'Proyectos Industriales HN', tax_id: 'DEMO-CLIENTE-05', email: 'proyectos@industrial.example' },
+  ]
+  for (const client of sampleClients) {
+    await prisma.client.upsert({
+      where: { id: client.id },
+      update: { ...client, country_id: honduras.id, is_active: true, deleted_at: null },
+      create: { ...client, country_id: honduras.id, is_active: true },
+    })
+  }
+
+  const sampleSuppliers = ['TECNASA', 'Distribuciones Globales', 'Redes y Datos HN', 'Importadora del Norte', 'Suministros Industriales']
+  for (const [index, name] of sampleSuppliers.entries()) {
+    const id = `00000000-0000-4000-8000-00000000020${index + 1}`
+    await prisma.supplier.upsert({
+      where: { id },
+      update: { name, country: 'Honduras', is_active: true, deleted_at: null },
+      create: { id, name, country: 'Honduras' },
+    })
+  }
 
   // ──────────────────────────────────────────────────────────
   // 4. TIPO DE CAMBIO USD → HNL (referencia inicial)
@@ -724,6 +745,9 @@ async function main() {
     ],
   })
 
+  console.log('  → Cotizaciones de demostración (escenarios aéreo, priority y marítimo)...')
+  await seedSampleData(prisma)
+
   console.log('')
   console.log('✅ Seed completado exitosamente.')
   console.log('')
@@ -732,6 +756,9 @@ async function main() {
   console.log('   • 7 países (1 activo: Honduras)')
   console.log('   • 1 usuario admin  →  admin@gaci.local')
   console.log('   • 1 tipo de cambio USD→HNL L27.004 (2026-09-14)')
+  console.log('   • 5 clientes y 5 proveedores de demostración')
+  console.log('   • 6 productos de demostración con peso real y volumen')
+  console.log('   • 5 cotizaciones multimodo con escenarios Regular/Priority')
   console.log('   • 1 pallet estándar')
   console.log('   • 1 consolidador (PFI)')
   console.log('     - Tarifa Aérea Honduras 2026  (9 componentes: Air Freight regular + Priority)')

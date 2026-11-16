@@ -60,6 +60,7 @@ El seed crea `admin@gaci.local` con la contraseña definida en `ADMIN_INITIAL_PA
 | `pnpm prisma:studio` | Explorador visual de la BD |
 | `pnpm prisma:seed` | Ejecuta `prisma/seed.ts` (datos base y tarifas; solo desarrollo) |
 | `pnpm prisma:samples` | Productos y cotizaciones de ejemplo; `--reset` borra todas las cotizaciones antes |
+| `pnpm prisma:pfi-order` | Carga o actualiza los cinco productos del reporte PFI de prueba |
 | `pnpm test` | Suite de pruebas (motor de cálculo, paridad con el Excel de PFI, escenarios) |
 
 ## Documentación
