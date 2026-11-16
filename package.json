@@ -21,7 +21,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "prisma:seed": "prisma db seed",
-    "prisma:samples": "tsx prisma/sample-data.ts"
+    "prisma:samples": "tsx prisma/sample-data.ts",
+    "prisma:pfi-order": "tsx prisma/pfi-order-seed.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
